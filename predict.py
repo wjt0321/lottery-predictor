@@ -7,9 +7,10 @@ import json
 import os
 import random
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Set
+import math
 
 
 DATA_FILE = "lottery_data.json"
@@ -583,6 +584,8 @@ def main():
                        help='主Agent差异学习回看期数（仅team模式生效）')
     parser.add_argument('--seed', type=int, default=None,
                        help='随机种子（用于复现实验）')
+    parser.add_argument('--advanced', '-adv', action='store_true',
+                       help='使用高级综合分析（时间加权+关联分析+模式识别+遗传算法）')
     
     args = parser.parse_args()
     rng = random.Random(args.seed)
@@ -677,17 +680,415 @@ def main():
             'random': '完全随机'
         }
 
-        for strategy in strategies:
-            name = strategy_names.get(strategy, strategy)
-            print(f"\n{name}:")
-
+        if args.advanced:
+            # 使用高级综合分析
+            print("\n🚀 使用高级综合分析模式...")
             for i in range(args.num):
-                red, blue = generate_prediction(records, strategy, rng=rng)
+                red, blue = generate_advanced_prediction(records, rng=rng)
                 print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d}")
+        else:
+            for strategy in strategies:
+                name = strategy_names.get(strategy, strategy)
+                print(f"\n{name}:")
+
+                for i in range(args.num):
+                    red, blue = generate_prediction(records, strategy, rng=rng)
+                    print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d}")
     
     print("\n" + "=" * 60)
     print("⚠️ 仅供娱乐，不构成投注建议！")
     print("=" * 60)
+
+
+# ============================================================================
+# 高级分析模块 - 综合方案
+# ============================================================================
+
+class AdvancedAnalyzer:
+    """高级分析器：整合时间加权、关联分析、模式识别和遗传算法"""
+    
+    def __init__(self, records: List[Dict]):
+        self.records = records
+        self.red_range = range(1, 34)
+        self.blue_range = range(1, 17)
+    
+    # ========================================================================
+    # 1. 时间加权分析（指数衰减）
+    # ========================================================================
+    def analyze_time_weighted(self, decay_factor: float = 0.95) -> Dict:
+        """时间加权分析：近期数据权重更高，远期数据指数衰减"""
+        red_weights = Counter()
+        blue_weights = Counter()
+        
+        for idx, record in enumerate(self.records):
+            # 权重指数衰减：越新的数据权重越高
+            weight = decay_factor ** idx
+            for ball in record['red_balls']:
+                red_weights[ball] += weight
+            blue_weights[record['blue_ball']] += weight
+        
+        # 归一化权重
+        max_red = max(red_weights.values()) if red_weights else 1
+        max_blue = max(blue_weights.values()) if blue_weights else 1
+        
+        red_scores = {n: red_weights.get(n, 0) / max_red for n in self.red_range}
+        blue_scores = {n: blue_weights.get(n, 0) / max_blue for n in self.blue_range}
+        
+        return {
+            'red_scores': red_scores,
+            'blue_scores': blue_scores,
+            'top_red': sorted(red_scores.items(), key=lambda x: x[1], reverse=True),
+            'top_blue': sorted(blue_scores.items(), key=lambda x: x[1], reverse=True)
+        }
+    
+    # ========================================================================
+    # 2. 号码关联分析（马尔可夫链 + 共现分析）
+    # ========================================================================
+    def analyze_number_correlation(self) -> Dict:
+        """号码关联分析：分析哪些号码经常一起出现"""
+        # 共现频率
+        pair_counts = Counter()
+        triple_counts = Counter()
+        
+        # 转移概率（马尔可夫链）
+        red_transitions = defaultdict(Counter)
+        
+        for record in self.records:
+            balls = sorted(record['red_balls'])
+            
+            # 分析两两共现
+            for i in range(len(balls)):
+                for j in range(i + 1, len(balls)):
+                    pair_counts[(balls[i], balls[j])] += 1
+                
+                # 分析三连号共现
+                for j in range(i + 1, len(balls)):
+                    for k in range(j + 1, len(balls)):
+                        triple_counts[(balls[i], balls[j], balls[k])] += 1
+            
+            # 马尔可夫转移（当前期到下一期的号码转移）
+            # 简化版：记录相邻号码的关系
+            for i in range(len(balls) - 1):
+                red_transitions[balls[i]][balls[i + 1]] += 1
+        
+        # 找出最频繁的关联对
+        top_pairs = pair_counts.most_common(20)
+        top_triples = triple_counts.most_common(10)
+        
+        return {
+            'pair_counts': dict(pair_counts),
+            'triple_counts': dict(triple_counts),
+            'top_pairs': top_pairs,
+            'top_triples': top_triples,
+            'transitions': dict(red_transitions)
+        }
+    
+    # ========================================================================
+    # 3. 模式识别策略
+    # ========================================================================
+    def analyze_patterns(self, recent_periods: int = 20) -> Dict:
+        """模式识别：连号、同尾号、区间分布、奇偶比、大小比"""
+        recent = self.records[:recent_periods]
+        
+        patterns = {
+            'consecutive': [],  # 连号模式
+            'same_tail': [],    # 同尾号模式
+            'odd_even': [],     # 奇偶比
+            'big_small': [],    # 大小比
+            'zone_dist': [],    # 区间分布
+            'sum_range': []     # 和值范围
+        }
+        
+        for record in recent:
+            balls = sorted(record['red_balls'])
+            
+            # 1. 连号检测
+            consecutive_groups = []
+            current_group = [balls[0]]
+            for i in range(1, len(balls)):
+                if balls[i] == balls[i-1] + 1:
+                    current_group.append(balls[i])
+                else:
+                    if len(current_group) >= 2:
+                        consecutive_groups.append(tuple(current_group))
+                    current_group = [balls[i]]
+            if len(current_group) >= 2:
+                consecutive_groups.append(tuple(current_group))
+            patterns['consecutive'].extend(consecutive_groups)
+            
+            # 2. 同尾号检测
+            tails = defaultdict(list)
+            for ball in balls:
+                tails[ball % 10].append(ball)
+            same_tail_groups = [v for v in tails.values() if len(v) >= 2]
+            patterns['same_tail'].extend([tuple(g) for g in same_tail_groups])
+            
+            # 3. 奇偶比
+            odd_count = sum(1 for b in balls if b % 2 == 1)
+            patterns['odd_even'].append((odd_count, 6 - odd_count))
+            
+            # 4. 大小比（1-16小，17-33大）
+            big_count = sum(1 for b in balls if b >= 17)
+            patterns['big_small'].append((6 - big_count, big_count))
+            
+            # 5. 区间分布（1-11, 12-22, 23-33）
+            zone1 = sum(1 for b in balls if 1 <= b <= 11)
+            zone2 = sum(1 for b in balls if 12 <= b <= 22)
+            zone3 = sum(1 for b in balls if 23 <= b <= 33)
+            patterns['zone_dist'].append((zone1, zone2, zone3))
+            
+            # 6. 和值
+            patterns['sum_range'].append(sum(balls))
+        
+        # 统计最频繁的模式
+        from collections import Counter as PatternCounter
+        
+        return {
+            'consecutive_freq': PatternCounter(patterns['consecutive']).most_common(5),
+            'same_tail_freq': PatternCounter(patterns['same_tail']).most_common(5),
+            'odd_even_freq': PatternCounter(patterns['odd_even']).most_common(3),
+            'big_small_freq': PatternCounter(patterns['big_small']).most_common(3),
+            'zone_dist_freq': PatternCounter(patterns['zone_dist']).most_common(3),
+            'avg_sum': sum(patterns['sum_range']) / len(patterns['sum_range']) if patterns['sum_range'] else 100,
+            'sum_std': self._calculate_std(patterns['sum_range']) if patterns['sum_range'] else 20
+        }
+    
+    def _calculate_std(self, values: List[float]) -> float:
+        """计算标准差"""
+        if len(values) < 2:
+            return 0
+        mean = sum(values) / len(values)
+        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        return math.sqrt(variance)
+    
+    # ========================================================================
+    # 4. 遗传算法优化
+    # ========================================================================
+    class GeneticOptimizer:
+        """遗传算法优化器"""
+        
+        def __init__(self, analyzer: 'AdvancedAnalyzer', population_size: int = 50, generations: int = 30):
+            self.analyzer = analyzer
+            self.population_size = population_size
+            self.generations = generations
+            self.records = analyzer.records
+            
+            # 预计算历史数据用于适应度评估
+            self.historical_sets = [set(r['red_balls']) for r in self.records[:50]]
+        
+        def create_individual(self, rng: random.Random) -> Set[int]:
+            """创建一个个体（6个红球）"""
+            return set(rng.sample(range(1, 34), 6))
+        
+        def fitness(self, individual: Set[int]) -> float:
+            """适应度函数：与历史开奖的重合度"""
+            if not self.historical_sets:
+                return 0.5
+            
+            # 计算与历史开奖的平均重合度
+            total_score = 0
+            for historical in self.historical_sets:
+                intersection = len(individual & historical)
+                # 奖励 2-4 个重合（实际中奖范围）
+                if 2 <= intersection <= 4:
+                    total_score += intersection * 0.3
+                else:
+                    total_score += intersection * 0.1
+            
+            avg_score = total_score / len(self.historical_sets)
+            
+            # 额外奖励：包含热号和冷号的平衡
+            hot_cold_bonus = self._hot_cold_balance_bonus(individual)
+            
+            return avg_score + hot_cold_bonus
+        
+        def _hot_cold_balance_bonus(self, individual: Set[int]) -> float:
+            """热冷平衡奖励"""
+            # 简单版：检查是否包含不同区间的号码
+            zones = [0, 0, 0]  # 1-11, 12-22, 23-33
+            for ball in individual:
+                if ball <= 11:
+                    zones[0] += 1
+                elif ball <= 22:
+                    zones[1] += 1
+                else:
+                    zones[2] += 1
+            
+            # 奖励均匀分布
+            if all(z >= 1 for z in zones):
+                return 0.2
+            return 0
+        
+        def crossover(self, parent1: Set[int], parent2: Set[int], rng: random.Random) -> Set[int]:
+            """交叉操作"""
+            # 取两个父代的交集，然后随机补充
+            intersection = parent1 & parent2
+            remaining = list((parent1 | parent2) - intersection)
+            
+            child = set(intersection)
+            needed = 6 - len(child)
+            
+            if needed > 0 and remaining:
+                child.update(rng.sample(remaining, min(needed, len(remaining))))
+            
+            # 如果还不够，随机补充
+            if len(child) < 6:
+                all_numbers = set(range(1, 34)) - child
+                child.update(rng.sample(list(all_numbers), 6 - len(child)))
+            
+            return child
+        
+        def mutate(self, individual: Set[int], mutation_rate: float, rng: random.Random) -> Set[int]:
+            """变异操作"""
+            individual = set(individual)
+            if rng.random() < mutation_rate:
+                # 随机替换一个号码
+                to_remove = rng.choice(list(individual))
+                to_add = rng.choice([n for n in range(1, 34) if n not in individual])
+                individual.remove(to_remove)
+                individual.add(to_add)
+            return individual
+        
+        def optimize(self, rng: random.Random = None) -> List[int]:
+            """运行遗传算法优化"""
+            rng = rng or random.Random()
+            
+            # 初始化种群
+            population = [self.create_individual(rng) for _ in range(self.population_size)]
+            
+            for generation in range(self.generations):
+                # 评估适应度
+                fitness_scores = [(ind, self.fitness(ind)) for ind in population]
+                fitness_scores.sort(key=lambda x: x[1], reverse=True)
+                
+                # 选择精英
+                elite_size = self.population_size // 4
+                new_population = [ind for ind, _ in fitness_scores[:elite_size]]
+                
+                # 交叉和变异产生新一代
+                while len(new_population) < self.population_size:
+                    parent1 = rng.choice([ind for ind, _ in fitness_scores[:self.population_size//2]])
+                    parent2 = rng.choice([ind for ind, _ in fitness_scores[:self.population_size//2]])
+                    child = self.crossover(parent1, parent2, rng)
+                    child = self.mutate(child, 0.1, rng)
+                    new_population.append(child)
+                
+                population = new_population
+            
+            # 返回最佳个体
+            best = max(population, key=self.fitness)
+            return sorted(best)
+    
+    # ========================================================================
+    # 综合分析：整合所有方法
+    # ========================================================================
+    def comprehensive_analysis(self) -> Dict:
+        """运行所有分析方法并整合结果"""
+        print("\n" + "=" * 60)
+        print("🔬 高级综合分析")
+        print("=" * 60)
+        
+        # 1. 时间加权分析
+        print("\n📊 1. 时间加权分析（指数衰减）...")
+        time_weighted = self.analyze_time_weighted(decay_factor=0.95)
+        print(f"   时间加权热号: {[n for n, _ in time_weighted['top_red'][:10]]}")
+        
+        # 2. 关联分析
+        print("\n🔗 2. 号码关联分析...")
+        correlation = self.analyze_number_correlation()
+        if correlation['top_pairs']:
+            print(f"   高频关联对: {correlation['top_pairs'][:5]}")
+        
+        # 3. 模式识别
+        print("\n🎯 3. 模式识别分析...")
+        patterns = self.analyze_patterns(recent_periods=20)
+        print(f"   常见奇偶比: {patterns['odd_even_freq'][:3]}")
+        print(f"   常见大小比: {patterns['big_small_freq'][:3]}")
+        print(f"   平均和值: {patterns['avg_sum']:.1f} ± {patterns['sum_std']:.1f}")
+        
+        # 4. 遗传算法优化
+        print("\n🧬 4. 遗传算法优化...")
+        ga = self.GeneticOptimizer(self, population_size=30, generations=20)
+        ga_result = ga.optimize()
+        print(f"   遗传算法推荐: {ga_result}")
+        
+        return {
+            'time_weighted': time_weighted,
+            'correlation': correlation,
+            'patterns': patterns,
+            'genetic_result': ga_result
+        }
+
+
+def generate_advanced_prediction(records: List[Dict], rng: random.Random = None) -> Tuple[List[int], int]:
+    """使用高级分析生成预测"""
+    rng = rng or random.Random()
+    analyzer = AdvancedAnalyzer(records)
+    
+    # 运行综合分析
+    analysis = analyzer.comprehensive_analysis()
+    
+    # 整合多种方法生成红球
+    red_candidates = set()
+    
+    # 1. 加入时间加权高分号码
+    time_top = [n for n, _ in analysis['time_weighted']['top_red'][:8]]
+    red_candidates.update(time_top[:4])
+    
+    # 2. 加入遗传算法结果
+    red_candidates.update(analysis['genetic_result'][:3])
+    
+    # 3. 加入关联分析中的高频对
+    if analysis['correlation']['top_pairs']:
+        for (a, b), count in analysis['correlation']['top_pairs'][:3]:
+            red_candidates.add(a)
+            red_candidates.add(b)
+    
+    # 4. 根据模式补充
+    patterns = analysis['patterns']
+    
+    # 根据常见奇偶比调整
+    if patterns['odd_even_freq']:
+        common_odd_even = patterns['odd_even_freq'][0][0]
+        target_odd = common_odd_even[0]
+    else:
+        target_odd = 3
+    
+    # 根据和值范围调整
+    target_sum_min = int(patterns['avg_sum'] - patterns['sum_std'])
+    target_sum_max = int(patterns['avg_sum'] + patterns['sum_std'])
+    
+    # 从候选池中选择6个号码，尽量满足约束
+    red_balls = sorted(red_candidates)
+    if len(red_balls) < 6:
+        # 补充号码
+        all_numbers = set(range(1, 34)) - set(red_balls)
+        red_balls.extend(rng.sample(list(all_numbers), 6 - len(red_balls)))
+        red_balls = sorted(red_balls[:6])
+    elif len(red_balls) > 6:
+        # 根据时间加权分数筛选
+        red_scores = {n: s for n, s in analysis['time_weighted']['top_red']}
+        red_balls = sorted(red_candidates, key=lambda x: red_scores.get(x, 0), reverse=True)[:6]
+    
+    # 蓝球：结合时间加权和遗传算法思想
+    blue_scores = analysis['time_weighted']['blue_scores']
+    # 加权随机选择
+    blue_candidates = list(range(1, 17))
+    blue_weights = [blue_scores.get(n, 0.5) + 0.1 for n in blue_candidates]
+    total_weight = sum(blue_weights)
+    blue_probs = [w / total_weight for w in blue_weights]
+    
+    # 根据概率选择
+    r = rng.random()
+    cumulative = 0
+    blue_ball = 1
+    for i, prob in enumerate(blue_probs):
+        cumulative += prob
+        if r <= cumulative:
+            blue_ball = blue_candidates[i]
+            break
+    
+    return red_balls, blue_ball
 
 
 if __name__ == "__main__":
