@@ -12,10 +12,18 @@ from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 import math
 
+# 尝试导入LSTM预测器
+try:
+    from lstm_predictor import generate_lstm_prediction, LSTMPredictor, TF_AVAILABLE
+except ImportError:
+    TF_AVAILABLE = False
+    LSTMPredictor = None
+    generate_lstm_prediction = None
+
 
 DATA_FILE = "lottery_data.json"
 ARCHIVE_DIR = "prediction_archive"
-AGENT_TEAMS = ("hot", "cold", "missing", "balanced", "random")
+AGENT_TEAMS = ("hot", "cold", "missing", "balanced", "random", "cycle", "sum", "zone", "lstm")
 
 
 def load_data():
@@ -149,6 +157,179 @@ def analyze_trend(records, periods=10):
     }
 
 
+# ============================================================================
+# 新增：3个高级Agent分析函数
+# ============================================================================
+
+def analyze_cycle(records, max_period=50):
+    """周期性分析：分析号码是否存在周期性规律"""
+    if len(records) < 10:
+        return {'cycle_scores': {}, 'top_cycle': []}
+    
+    cycle_scores = {}
+    
+    for number in range(1, 34):
+        # 获取该号码出现的期数索引
+        appearances = [i for i, r in enumerate(records) if number in r['red_balls']]
+        
+        if len(appearances) < 3:
+            cycle_scores[number] = 0
+            continue
+        
+        # 计算间隔
+        intervals = [appearances[i] - appearances[i-1] for i in range(1, len(appearances))]
+        
+        if not intervals:
+            cycle_scores[number] = 0
+            continue
+        
+        # 计算间隔的方差（方差越小，周期性越强）
+        avg_interval = sum(intervals) / len(intervals)
+        variance = sum((x - avg_interval) ** 2 for x in intervals) / len(intervals) if len(intervals) > 1 else 0
+        
+        # 周期性得分（间隔越稳定，得分越高）
+        if avg_interval > 0:
+            stability = 1 / (1 + variance / (avg_interval ** 2))
+            
+            # 预测下期出现的概率（基于周期）
+            last_appearance = appearances[-1]
+            expected_next = last_appearance + avg_interval
+            current_idx = len(records)
+            
+            # 距离预期出现时间的接近程度
+            distance = abs(current_idx - expected_next)
+            proximity_score = max(0, 1 - distance / avg_interval) if avg_interval > 0 else 0
+            
+            cycle_scores[number] = stability * proximity_score
+        else:
+            cycle_scores[number] = 0
+    
+    # 按周期性得分排序
+    sorted_cycles = sorted(cycle_scores.items(), key=lambda x: x[1], reverse=True)
+    
+    return {
+        'cycle_scores': cycle_scores,
+        'top_cycle': [num for num, score in sorted_cycles[:10] if score > 0],
+        'cycle_strength': {num: score for num, score in sorted_cycles[:10]}
+    }
+
+
+def analyze_sum_trend(records, periods=30):
+    """和值趋势分析：基于历史平均和值及标准差预测"""
+    if len(records) < 5:
+        return {'target_sum_range': (80, 130), 'sum_weights': {}}
+    
+    recent = records[:periods]
+    sums = [sum(r['red_balls']) for r in recent]
+    
+    avg_sum = sum(sums) / len(sums)
+    variance = sum((s - avg_sum) ** 2 for s in sums) / len(sums)
+    std_sum = variance ** 0.5
+    
+    # 目标范围：平均和值 ± 1个标准差
+    target_min = int(avg_sum - std_sum)
+    target_max = int(avg_sum + std_sum)
+    
+    # 计算每个号码对和值的贡献权重
+    sum_weights = {}
+    for number in range(1, 34):
+        # 该号码在历史开奖中的平均和值贡献
+        appearances = [sum(r['red_balls']) for r in records if number in r['red_balls']]
+        if appearances:
+            avg_contribution = sum(appearances) / len(appearances)
+            # 越接近目标平均和值，权重越高
+            distance = abs(avg_contribution - avg_sum)
+            sum_weights[number] = max(0, 1 - distance / (2 * std_sum)) if std_sum > 0 else 0.5
+        else:
+            sum_weights[number] = 0.3
+    
+    return {
+        'target_sum_range': (target_min, target_max),
+        'avg_sum': avg_sum,
+        'std_sum': std_sum,
+        'sum_weights': sum_weights,
+        'sum_history': sums[:10]  # 最近10期和值
+    }
+
+
+def analyze_zone_balance(records, periods=20):
+    """区间平衡分析：确保三区分布均衡"""
+    if len(records) < 5:
+        return {
+            'target_zones': {1: 2, 2: 2, 3: 2},
+            'zone_weights': {n: 1.0 for n in range(1, 34)}
+        }
+    
+    recent = records[:periods]
+    
+    # 统计各区间的出现频率
+    zone_counts = {1: Counter(), 2: Counter(), 3: Counter()}
+    zone_distribution = {1: [], 2: [], 3: []}
+    
+    for r in recent:
+        zone1_balls = [b for b in r['red_balls'] if 1 <= b <= 11]
+        zone2_balls = [b for b in r['red_balls'] if 12 <= b <= 22]
+        zone3_balls = [b for b in r['red_balls'] if 23 <= b <= 33]
+        
+        zone_distribution[1].append(len(zone1_balls))
+        zone_distribution[2].append(len(zone2_balls))
+        zone_distribution[3].append(len(zone3_balls))
+        
+        zone_counts[1].update(zone1_balls)
+        zone_counts[2].update(zone2_balls)
+        zone_counts[3].update(zone3_balls)
+    
+    # 计算平均分布
+    avg_zone_dist = {
+        1: sum(zone_distribution[1]) / len(zone_distribution[1]),
+        2: sum(zone_distribution[2]) / len(zone_distribution[2]),
+        3: sum(zone_distribution[3]) / len(zone_distribution[3])
+    }
+    
+    # 目标分布：向均衡靠拢（理想是2-2-2）
+    target_zones = {}
+    for zone in [1, 2, 3]:
+        # 如果某区偏少，下期应该多选
+        if avg_zone_dist[zone] < 2:
+            target_zones[zone] = min(3, int(2.5 - avg_zone_dist[zone] + 2))
+        elif avg_zone_dist[zone] > 2:
+            target_zones[zone] = max(1, int(2 - (avg_zone_dist[zone] - 2)))
+        else:
+            target_zones[zone] = 2
+    
+    # 为每个号码计算区间权重
+    zone_weights = {}
+    for number in range(1, 34):
+        if number <= 11:
+            zone = 1
+        elif number <= 22:
+            zone = 2
+        else:
+            zone = 3
+        
+        # 该区需要补充的号码数越多，权重越高
+        zone_need = target_zones[zone]
+        current_avg = avg_zone_dist[zone]
+        
+        if current_avg < zone_need:
+            zone_weights[number] = 1.5  # 需要补充，权重提高
+        elif current_avg > zone_need:
+            zone_weights[number] = 0.7  # 过多，权重降低
+        else:
+            zone_weights[number] = 1.0  # 正常
+    
+    return {
+        'target_zones': target_zones,
+        'avg_zone_dist': avg_zone_dist,
+        'zone_weights': zone_weights,
+        'zone_hot': {
+            1: [n for n, c in zone_counts[1].most_common(5)],
+            2: [n for n, c in zone_counts[2].most_common(5)],
+            3: [n for n, c in zone_counts[3].most_common(5)]
+        }
+    }
+
+
 def _safe_red_sample(
     rng: random.Random, candidates: List[int], required: int = 6
 ) -> List[int]:
@@ -161,7 +342,7 @@ def _safe_red_sample(
 
 
 def generate_prediction(records, strategy='balanced', rng: random.Random = None):
-    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重"""
+    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重，支持8种策略"""
     rng = rng or random.Random()
     if not records:
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
@@ -197,6 +378,45 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None)
         candidates = list(set(hot_red[:4] + cold_red[:4] + high_missing[:4]))
         # 蓝球平衡选择
         blue_candidates = list(set(hot_blue[:3] + high_missing_blue[:3]))
+    elif strategy == 'cycle':
+        # 周期性策略
+        cycle_analysis = analyze_cycle(records)
+        candidates = cycle_analysis['top_cycle'][:10]
+        blue_candidates = list(range(1, 17))
+    elif strategy == 'sum':
+        # 和值趋势策略
+        sum_analysis = analyze_sum_trend(records)
+        # 根据和值权重选择号码
+        weighted_candidates = sorted(
+            sum_analysis['sum_weights'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        candidates = [n for n, w in weighted_candidates[:12]]
+        blue_candidates = list(range(1, 17))
+    elif strategy == 'zone':
+        # 区间平衡策略
+        zone_analysis = analyze_zone_balance(records)
+        # 从各区热号中选择，优先选择需要补充的区
+        candidates = []
+        for zone in [1, 2, 3]:
+            zone_hot = zone_analysis['zone_hot'][zone]
+            # 根据该区需要的数量选择
+            need = zone_analysis['target_zones'][zone]
+            candidates.extend(zone_hot[:need + 1])
+        candidates = list(set(candidates))
+        blue_candidates = list(range(1, 17))
+    elif strategy == 'lstm':
+        # LSTM神经网络策略
+        if TF_AVAILABLE and generate_lstm_prediction:
+            try:
+                return generate_lstm_prediction(records, sequence_length=10)
+            except Exception as e:
+                print(f"⚠️ LSTM预测失败: {e}，使用随机策略")
+                return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
+        else:
+            # TensorFlow未安装，使用随机策略
+            return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
 
@@ -574,8 +794,8 @@ def main():
     parser.add_argument('--mode', '-m', default='team', choices=['single', 'team'],
                        help='预测模式：single=单策略，team=多Agent团队')
     parser.add_argument('--strategy', '-s', default='balanced',
-                       choices=['hot', 'cold', 'missing', 'balanced', 'random'],
-                       help='预测策略')
+                       choices=['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone', 'lstm'],
+                       help='预测策略（新增：cycle=周期性, sum=和值趋势, zone=区间平衡, lstm=神经网络）')
     parser.add_argument('--num', '-n', type=int, default=5,
                        help='生成注数')
     parser.add_argument('--all', '-a', action='store_true',
@@ -671,13 +891,17 @@ def main():
         saved_path = save_compact_prediction(target_period, final_tickets, summary)
         print(f"\n💾 已归档本期精简预测: {saved_path}")
     else:
-        strategies = ['hot', 'cold', 'missing', 'balanced', 'random'] if args.all else [args.strategy]
+        strategies = ['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone', 'lstm'] if args.all else [args.strategy]
         strategy_names = {
             'hot': '追热策略',
             'cold': '追冷策略',
             'missing': '高遗漏策略',
             'balanced': '平衡策略',
-            'random': '完全随机'
+            'random': '完全随机',
+            'cycle': '周期性策略',
+            'sum': '和值趋势策略',
+            'zone': '区间平衡策略',
+            'lstm': 'LSTM神经网络策略'
         }
 
         if args.advanced:
