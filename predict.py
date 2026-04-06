@@ -24,7 +24,7 @@ def load_data():
 
 
 def analyze_hot_cold(records, recent_periods=30):
-    """冷热号分析"""
+    """冷热号分析 - 优化：增加蓝球冷号分析"""
     recent = records[:recent_periods]
     red_counts = Counter()
     blue_counts = Counter()
@@ -39,30 +39,112 @@ def analyze_hot_cold(records, recent_periods=30):
         blue_counts.setdefault(number, 0)
 
     red_freq = sorted(red_counts.items(), key=lambda x: x[1], reverse=True)
+    blue_freq = sorted(blue_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # 蓝球冷热分析
+    hot_blue = [n for n, c in blue_freq[:5]]
+    cold_blue = [n for n, c in blue_freq[-5:]]
     
     return {
         'hot_red': [n for n, c in red_freq[:10]],
         'cold_red': [n for n, c in red_freq[-10:]],
-        'hot_blue': [n for n, c in sorted(blue_counts.items(), key=lambda x: x[1], reverse=True)[:5]],
-        'red_freq': dict(red_freq)
+        'hot_blue': hot_blue,
+        'cold_blue': cold_blue,
+        'red_freq': dict(red_freq),
+        'blue_freq': dict(blue_freq)
+    }
+
+
+def analyze_blue_missing(records):
+    """新增：蓝球遗漏分析"""
+    last_seen = {i: -1 for i in range(1, 17)}
+    
+    for idx, r in enumerate(records):
+        blue = r['blue_ball']
+        last_seen[blue] = idx
+    
+    blue_missing = {}
+    for num in range(1, 17):
+        if last_seen[num] == -1:
+            blue_missing[num] = len(records)
+        else:
+            blue_missing[num] = last_seen[num]
+    
+    missing_sorted = sorted(blue_missing.items(), key=lambda x: x[1], reverse=True)
+    
+    return {
+        'high_missing_blue': [num for num, count in missing_sorted[:5]],
+        'blue_missing': blue_missing
     }
 
 
 def analyze_missing(records):
-    """遗漏值分析"""
+    """遗漏值分析 - 优化：追踪连续遗漏期数"""
     last_seen = {i: -1 for i in range(1, 34)}
     
     for idx, r in enumerate(records):
         for ball in r['red_balls']:
-            if last_seen[ball] == -1:
-                last_seen[ball] = idx
+            last_seen[ball] = idx
     
-    red_missing = {num: idx if idx != -1 else len(records) for num, idx in last_seen.items()}
+    # 计算每个号码的遗漏期数（距离上次出现的期数）
+    red_missing = {}
+    for num in range(1, 34):
+        if last_seen[num] == -1:
+            red_missing[num] = len(records)  # 从未出现，遗漏期数=总记录数
+        else:
+            red_missing[num] = last_seen[num]  # 距离上次出现的期数
+    
+    # 按遗漏期数排序（遗漏越多越靠前）
     missing_sorted = sorted(red_missing.items(), key=lambda x: x[1], reverse=True)
     
     return {
         'high_missing_red': [num for num, count in missing_sorted[:10]],
-        'red_missing': red_missing
+        'red_missing': red_missing,
+        'missing_sorted': missing_sorted
+    }
+
+
+def analyze_trend(records, periods=10):
+    """新增：趋势分析 - 分析近期号码分布趋势"""
+    if len(records) < periods:
+        periods = len(records)
+    
+    recent = records[:periods]
+    
+    # 分析奇偶比
+    odd_even_ratio = []
+    for r in recent:
+        odd_count = sum(1 for ball in r['red_balls'] if ball % 2 == 1)
+        odd_even_ratio.append(odd_count)
+    avg_odd = sum(odd_even_ratio) / len(odd_even_ratio)
+    
+    # 分析大小比（1-16小，17-33大）
+    big_small_ratio = []
+    for r in recent:
+        big_count = sum(1 for ball in r['red_balls'] if ball >= 17)
+        big_small_ratio.append(big_count)
+    avg_big = sum(big_small_ratio) / len(big_small_ratio)
+    
+    # 分析区间分布（1-11, 12-22, 23-33）
+    zone_distribution = {1: [], 2: [], 3: []}
+    for r in recent:
+        zone1 = sum(1 for ball in r['red_balls'] if 1 <= ball <= 11)
+        zone2 = sum(1 for ball in r['red_balls'] if 12 <= ball <= 22)
+        zone3 = sum(1 for ball in r['red_balls'] if 23 <= ball <= 33)
+        zone_distribution[1].append(zone1)
+        zone_distribution[2].append(zone2)
+        zone_distribution[3].append(zone3)
+    
+    avg_zones = {
+        1: sum(zone_distribution[1]) / len(zone_distribution[1]),
+        2: sum(zone_distribution[2]) / len(zone_distribution[2]),
+        3: sum(zone_distribution[3]) / len(zone_distribution[3])
+    }
+    
+    return {
+        'avg_odd': avg_odd,
+        'avg_big': avg_big,
+        'avg_zones': avg_zones
     }
 
 
@@ -78,38 +160,52 @@ def _safe_red_sample(
 
 
 def generate_prediction(records, strategy='balanced', rng: random.Random = None):
-    """按单策略生成预测号码。"""
+    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重"""
     rng = rng or random.Random()
     if not records:
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
     
     analysis = {
         'hot_cold': analyze_hot_cold(records),
-        'missing': analyze_missing(records)
+        'missing': analyze_missing(records),
+        'blue_missing': analyze_blue_missing(records),
+        'trend': analyze_trend(records)
     }
     
     hot_red = analysis['hot_cold']['hot_red']
     cold_red = analysis['hot_cold']['cold_red']
     high_missing = analysis['missing']['high_missing_red']
     hot_blue = analysis['hot_cold']['hot_blue']
+    cold_blue = analysis['hot_cold']['cold_blue']
+    high_missing_blue = analysis['blue_missing']['high_missing_blue']
     
     if strategy == 'hot':
         candidates = hot_red
-        blue_candidates = hot_blue
+        # 蓝球选择：热号为主，兼顾遗漏
+        blue_candidates = hot_blue + high_missing_blue[:2]
     elif strategy == 'cold':
         candidates = cold_red
-        blue_candidates = list(range(1, 17))
+        # 蓝球选择：冷号 + 高遗漏
+        blue_candidates = cold_blue + high_missing_blue[:3]
     elif strategy == 'missing':
         candidates = high_missing
-        blue_candidates = list(range(1, 17))
+        # 蓝球选择：高遗漏优先
+        blue_candidates = high_missing_blue + cold_blue[:2]
     elif strategy == 'balanced':
-        candidates = list(set(hot_red[:5] + cold_red[:5] + high_missing[:5]))
-        blue_candidates = list(range(1, 17))
+        # 平衡策略优化：增加权重分配
+        candidates = list(set(hot_red[:4] + cold_red[:4] + high_missing[:4]))
+        # 蓝球平衡选择
+        blue_candidates = list(set(hot_blue[:3] + high_missing_blue[:3]))
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
 
     red_balls = _safe_red_sample(rng, candidates, required=6)
-    blue_ball = rng.choice(blue_candidates)
+    
+    # 蓝球选择优化：如果有候选池，加权随机选择；否则纯随机
+    if blue_candidates:
+        blue_ball = rng.choice(blue_candidates)
+    else:
+        blue_ball = rng.randint(1, 16)
     
     return red_balls, blue_ball
 
