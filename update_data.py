@@ -8,10 +8,14 @@
 import json
 import os
 from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 
 DATA_FILE = "lottery_data.json"
+FETCH_TARGET_RECORDS = 220
+MAX_FETCH_PAGES = 8
 
 
 def load_existing_data():
@@ -41,8 +45,57 @@ def save_data(records):
 
 def fetch_from_500():
     """从500彩票网抓取数据"""
-    records = []
-    
+    records_by_period = {}
+
+    def parse_html_table(html_text):
+        parsed = {}
+        soup = BeautifulSoup(html_text, 'html.parser')
+        rows = soup.select('#tdata tr')
+        for row in rows:
+            cells = [td.get_text(strip=True) for td in row.select('td')]
+            if len(cells) < 16:
+                continue
+            period = cells[0]
+            reds = cells[1:7]
+            blue = cells[7]
+            date_text = cells[15] if len(cells) > 15 else ''
+            if not period.isdigit():
+                continue
+            if not all(x.isdigit() for x in reds) or not blue.isdigit() or not date_text:
+                continue
+            full_period = f"20{period}"
+            parsed[full_period] = {
+                "period": full_period,
+                "date": date_text,
+                "red_balls": sorted(int(x) for x in reds),
+                "blue_ball": int(blue),
+            }
+        return parsed
+
+    try:
+        print("🌐 正在访问500彩票网历史接口...")
+        base_url = 'https://datachart.500.com/ssq/history/newinc/history.php'
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://datachart.500.com/ssq/history/history.shtml",
+        }
+        first_html = requests.get(base_url, headers=headers, timeout=30).text
+        first_soup = BeautifulSoup(first_html, 'html.parser')
+        end_issue = first_soup.select_one('input[name="end"]')
+        end_value = end_issue.get('value', '').strip() if end_issue else ''
+        if end_value.isdigit():
+            start_value = max(3001, int(end_value) - 2000)
+            full_url = f"{base_url}?start={start_value}&end={end_value}"
+            all_html = requests.get(full_url, headers=headers, timeout=30).text
+            records_by_period.update(parse_html_table(all_html))
+            print(f"📊 历史接口解析 {len(records_by_period)} 条记录")
+            if len(records_by_period) >= FETCH_TARGET_RECORDS:
+                return list(records_by_period.values())
+        else:
+            records_by_period.update(parse_html_table(first_html))
+    except Exception as e:
+        print(f"   历史接口抓取失败: {e}")
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -74,40 +127,53 @@ def fetch_from_500():
                 print(f"   点击100期链接失败: {e}")
             
             print("📊 正在提取数据...")
-            rows = page.query_selector_all('#tdata tr')
-            
-            for i, row in enumerate(rows):
-                try:
-                    cells = row.query_selector_all('td')
-                    if len(cells) >= 16:  # 实际有16个单元格
-                        period = cells[0].inner_text().strip()
-                        red_balls = []
-                        for j in range(1, 7):
-                            ball_text = cells[j].inner_text().strip()
-                            if ball_text.isdigit():
-                                red_balls.append(int(ball_text))
-                        
-                        blue_text = cells[7].inner_text().strip()
-                        blue_ball = int(blue_text) if blue_text.isdigit() else 0
-                        # 日期在第15列（索引15），但先检查是否存在
-                        date_text = cells[15].inner_text().strip() if len(cells) > 15 else ''
-                        
-                        # 调试输出前3行
-                        if i < 3:
-                            print(f"   第{i+1}行: 期号={period}, 红球数={len(red_balls)}, 蓝球={blue_ball}, 日期={date_text}")
-                        
-                        if period and len(red_balls) == 6 and blue_ball > 0 and date_text:
-                            records.append({
-                                "period": f"20{period}",
-                                "date": date_text,
-                                "red_balls": sorted(red_balls),
-                                "blue_ball": blue_ball
-                            })
-                except Exception as e:
-                    if i < 3:
-                        print(f"   第{i+1}行解析错误: {e}")
-                    continue
-            
+            for page_index in range(MAX_FETCH_PAGES):
+                rows = page.query_selector_all('#tdata tr')
+                for row in rows:
+                    try:
+                        cells = row.query_selector_all('td')
+                        if len(cells) >= 16:
+                            period = cells[0].inner_text().strip()
+                            red_balls = []
+                            for j in range(1, 7):
+                                ball_text = cells[j].inner_text().strip()
+                                if ball_text.isdigit():
+                                    red_balls.append(int(ball_text))
+                            blue_text = cells[7].inner_text().strip()
+                            blue_ball = int(blue_text) if blue_text.isdigit() else 0
+                            date_text = cells[15].inner_text().strip() if len(cells) > 15 else ''
+                            if period and len(red_balls) == 6 and blue_ball > 0 and date_text:
+                                full_period = f"20{period}"
+                                records_by_period[full_period] = {
+                                    "period": full_period,
+                                    "date": date_text,
+                                    "red_balls": sorted(red_balls),
+                                    "blue_ball": blue_ball
+                                }
+                    except Exception:
+                        continue
+                print(f"   第{page_index + 1}页累计解析 {len(records_by_period)} 条记录")
+                if len(records_by_period) >= FETCH_TARGET_RECORDS:
+                    break
+                moved = page.evaluate(
+                    """() => {
+                        if (typeof goNextPage === 'function') {
+                            goNextPage();
+                            return true;
+                        }
+                        const links = Array.from(document.querySelectorAll('a'));
+                        const link = links.find(a => /下一页|下页|next/i.test((a.textContent || '').trim()));
+                        if (link) {
+                            link.click();
+                            return true;
+                        }
+                        return false;
+                    }"""
+                )
+                if not moved:
+                    break
+                page.wait_for_timeout(1500)
+            records = list(records_by_period.values())
             print(f"   成功解析 {len(records)} 条记录")
             browser.close()
     except Exception as e:
