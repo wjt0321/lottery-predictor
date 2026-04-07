@@ -218,51 +218,19 @@ python predict.py --mode team --num 5 --learn-cycles 24
 
 预测归档目录，存储每期预测结果用于回测分析。
 
-## 使用示例
+## 按场景速查表
 
-### 日常预测
-
-```bash
-# 更新数据后运行团队预测
-python update_data.py
-python predict.py
-```
-
-### 单策略预测
-
-```bash
-# 追热策略，生成3注
-python predict.py --mode single --strategy hot --num 3
-
-# 周期性策略
-python predict.py --mode single --strategy cycle --num 3
-
-# 和值趋势策略
-python predict.py --mode single --strategy sum --num 3
-
-# 区间平衡策略
-python predict.py --mode single --strategy zone --num 3
-```
-
-### 高级分析
-
-```bash
-# 使用高级综合分析
-python predict.py --advanced --num 5
-
-# 使用所有策略
-python predict.py --mode single --all --num 2
-```
-
-### LSTM神经网络
-
-```bash
-# 安装TensorFlow
-pip install tensorflow
-
-# 使用LSTM预测
-python predict.py --mode single --strategy lstm --num 3
-```
+| 场景 | 目标 | 推荐命令 |
+|------|------|----------|
+| 预测 | 日常团队预测（默认） | `python update_data.py`<br>`python predict.py --mode team --num 5` |
+| 预测 | 单策略快速对比 | `python predict.py --mode single --all --num 3` |
+| 预测 | 指定策略复现实验 | `python predict.py --mode single --strategy hot --num 3 --seed 42` |
+| 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
+| 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
+| 分析 | 导出报告 + 自动写回最新补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report` |
+| 补丁回灌 | 显式加载权重补丁预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
+| 补丁回灌 | 默认自动发现并加载补丁 | `python predict.py --mode team --num 5` |
+| 补丁回灌 | 关闭自动发现（无补丁文件时） | `python predict.py --mode team --num 5`（未提供 `--weight-patch` 且 `config/weight_patch.latest.json` 不存在） |
 
 ## 文件结构
 

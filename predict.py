@@ -447,6 +447,111 @@ def iterate_archived_cycles(
     return samples
 
 
+def _normalize_weights(values: List[float]) -> List[float]:
+    total = sum(max(v, 0.0) for v in values)
+    if total <= 0:
+        return [1.0 / len(values)] * len(values) if values else []
+    return [max(v, 0.0) / total for v in values]
+
+
+def _normalize_agent_weights(raw_weights: Dict[str, float]) -> Dict[str, float]:
+    cleaned = {agent: max(0.0, float(raw_weights.get(agent, 0.0))) for agent in AGENT_TEAMS}
+    total = sum(cleaned.values())
+    if total <= 0:
+        return {agent: 1 / len(AGENT_TEAMS) for agent in AGENT_TEAMS}
+    return {agent: cleaned[agent] / total for agent in AGENT_TEAMS}
+
+
+def load_weight_patch(patch_path: Optional[str]) -> Optional[Dict[str, float]]:
+    if not patch_path:
+        return None
+    if not os.path.isfile(patch_path):
+        return None
+    try:
+        with open(patch_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("recommended_base_weights"), dict):
+        return _normalize_agent_weights(payload.get("recommended_base_weights", {}))
+    deltas = payload.get("weight_deltas", {})
+    if isinstance(deltas, dict):
+        base = {agent: 1.0 / len(AGENT_TEAMS) for agent in AGENT_TEAMS}
+        for agent in AGENT_TEAMS:
+            base[agent] = max(0.0001, base[agent] + float(deltas.get(agent, 0.0)))
+        return _normalize_agent_weights(base)
+    return None
+
+
+def find_default_weight_patch(project_root: Optional[str] = None) -> Optional[str]:
+    root = project_root or os.getcwd()
+    candidate = os.path.join(root, "config", "weight_patch.latest.json")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def resolve_weight_patch_path(explicit_path: Optional[str], project_root: Optional[str] = None) -> Tuple[Optional[str], str]:
+    if explicit_path:
+        return explicit_path, "explicit"
+    default_path = find_default_weight_patch(project_root=project_root)
+    if default_path:
+        return default_path, "default"
+    return None, "none"
+
+
+def build_archive_lead_summary(diff_factor: float, lead_report: Dict[str, object], patch_source: str) -> str:
+    healthy_agents = lead_report.get("healthy_agents", []) or []
+    archive_summary = lead_report.get("archive_summary", "")
+    return f"factor={diff_factor:.2f};mode=team;patch_source={patch_source};agents={','.join(healthy_agents)};report={archive_summary}"
+
+
+def _window_agent_performance(
+    records: List[Dict],
+    cycles: int,
+    decay_gamma: float,
+) -> Dict[str, object]:
+    samples = list(iterate_archived_cycles(records, cycles=cycles))
+    if not samples:
+        return {
+            "cycles": cycles,
+            "samples": 0,
+            "avg_scores": {agent: 0.0 for agent in AGENT_TEAMS},
+            "diff_scores": {agent: 0.0 for agent in AGENT_TEAMS},
+        }
+
+    avg_scores = {agent: 0.0 for agent in AGENT_TEAMS}
+    diff_scores = {agent: 0.0 for agent in AGENT_TEAMS}
+    weight_acc = 0.0
+
+    for idx, (history_timeline, target) in enumerate(samples):
+        history = list(reversed(history_timeline))
+        round_weight = decay_gamma ** (len(samples) - idx - 1)
+        per_round_scores = {}
+        for agent in AGENT_TEAMS:
+            red, blue = generate_prediction(history, strategy=agent, rng=random.Random())
+            per_round_scores[agent] = _ticket_score(red, blue, target)
+
+        team_avg = sum(per_round_scores.values()) / len(per_round_scores)
+        for agent, score in per_round_scores.items():
+            avg_scores[agent] += score * round_weight
+            diff_scores[agent] += (score - team_avg) * round_weight
+        weight_acc += round_weight
+
+    if weight_acc <= 0:
+        weight_acc = 1.0
+    for agent in AGENT_TEAMS:
+        avg_scores[agent] /= weight_acc
+        diff_scores[agent] /= weight_acc
+
+    return {
+        "cycles": cycles,
+        "samples": len(samples),
+        "avg_scores": avg_scores,
+        "diff_scores": diff_scores,
+    }
+
+
 def _ticket_score(red: List[int], blue: int, actual: Dict) -> float:
     """统一评分：红球命中 + 蓝球加权命中。"""
     red_hits = len(set(red) & set(actual['red_balls']))
@@ -455,40 +560,165 @@ def _ticket_score(red: List[int], blue: int, actual: Dict) -> float:
 
 
 def train_lead_agent(
-    records: List[Dict], learning_cycles: int = 24, learning_rate: float = 0.15
+    records: List[Dict],
+    learning_cycles: int = 24,
+    learning_rate: float = 0.15,
+    window_sizes: Optional[Tuple[int, ...]] = None,
+    window_weights: Optional[Tuple[float, ...]] = None,
+    decay_gamma: float = 0.92,
+    initial_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """主Agent差异学习：根据近期回测对团队Agent动态赋权。"""
-    weights = {agent: 1.0 for agent in AGENT_TEAMS}
+    """主Agent差异学习：多窗口回测 + 时间衰减动态赋权。"""
+    if window_sizes is None:
+        window_sizes = (learning_cycles, learning_cycles * 2, learning_cycles * 4)
+    valid_windows = tuple(sorted({max(8, int(w)) for w in window_sizes}))
+    if window_weights is None:
+        raw_weights = [1 / (idx + 1) for idx in range(len(valid_windows))]
+    else:
+        raw_weights = list(window_weights[:len(valid_windows)])
+        if len(raw_weights) < len(valid_windows):
+            raw_weights.extend([raw_weights[-1] if raw_weights else 1.0] * (len(valid_windows) - len(raw_weights)))
+    normalized_window_weights = _normalize_weights(raw_weights)
+    initial_normalized = _normalize_agent_weights(initial_weights or {})
+    if initial_weights:
+        weights = {agent: max(0.05, initial_normalized[agent] * len(AGENT_TEAMS)) for agent in AGENT_TEAMS}
+    else:
+        weights = {agent: 1.0 for agent in AGENT_TEAMS}
     avg_scores = {agent: 0.0 for agent in AGENT_TEAMS}
     diff_scores = {agent: 0.0 for agent in AGENT_TEAMS}
-    rounds = 0
+    window_reports = []
+    active_weight_total = 0.0
 
-    for history_timeline, target in iterate_archived_cycles(records, cycles=learning_cycles):
-        history = list(reversed(history_timeline))
-        per_round_scores = {}
+    for idx, cycles in enumerate(valid_windows):
+        report = _window_agent_performance(records, cycles=cycles, decay_gamma=decay_gamma)
+        report_weight = normalized_window_weights[idx]
+        if report["samples"] <= 0:
+            report_weight = 0.0
+        window_reports.append(
+            {
+                "window": cycles,
+                "weight": round(report_weight, 4),
+                "samples": report["samples"],
+            }
+        )
+        if report_weight <= 0:
+            continue
+        active_weight_total += report_weight
         for agent in AGENT_TEAMS:
-            red, blue = generate_prediction(history, strategy=agent, rng=random.Random())
-            per_round_scores[agent] = _ticket_score(red, blue, target)
+            avg_scores[agent] += report["avg_scores"][agent] * report_weight
+            diff_scores[agent] += report["diff_scores"][agent] * report_weight
 
-        team_avg = sum(per_round_scores.values()) / len(per_round_scores)
-        for agent, score in per_round_scores.items():
-            avg_scores[agent] += score
-            diff = score - team_avg
-            diff_scores[agent] += diff
-            weights[agent] = max(0.05, weights[agent] + learning_rate * diff)
-        rounds += 1
-
-    if rounds == 0:
+    if active_weight_total <= 0:
         normalized = {agent: 1 / len(AGENT_TEAMS) for agent in AGENT_TEAMS}
-        return {"weights": normalized, "avg_scores": avg_scores, "diff_scores": diff_scores}
+        return {
+            "weights": normalized,
+            "avg_scores": avg_scores,
+            "diff_scores": diff_scores,
+            "window_reports": window_reports,
+            "meta": {
+                "decay_gamma": decay_gamma,
+                "learning_rate": learning_rate,
+                "initial_weights_applied": bool(initial_weights),
+            },
+        }
 
     for agent in AGENT_TEAMS:
-        avg_scores[agent] /= rounds
-        diff_scores[agent] /= rounds
+        avg_scores[agent] /= active_weight_total
+        diff_scores[agent] /= active_weight_total
+        weights[agent] = max(0.05, 1.0 + learning_rate * diff_scores[agent])
 
     total = sum(weights.values())
     normalized = {agent: weight / total for agent, weight in weights.items()}
-    return {"weights": normalized, "avg_scores": avg_scores, "diff_scores": diff_scores}
+    return {
+        "weights": normalized,
+        "avg_scores": avg_scores,
+        "diff_scores": diff_scores,
+        "window_reports": window_reports,
+        "meta": {
+            "decay_gamma": decay_gamma,
+            "learning_rate": learning_rate,
+            "initial_weights_applied": bool(initial_weights),
+        },
+    }
+
+
+def backtest_report(
+    records: List[Dict],
+    learning_cycles: int = 24,
+    windows: Optional[List[int]] = None,
+    decay_gamma: float = 0.92,
+) -> Dict[str, object]:
+    if windows is None:
+        windows = [learning_cycles, learning_cycles * 2, learning_cycles * 4]
+    valid_windows = sorted({max(8, int(w)) for w in windows})
+
+    overall = {
+        "samples": 0,
+        "avg_score": 0.0,
+        "hit_rate_ge2": 0.0,
+        "hit_rate_ge3": 0.0,
+        "blue_hit_rate": 0.0,
+    }
+    by_agent = {
+        agent: {"samples": 0, "avg_score": 0.0, "hit_rate_ge2": 0.0, "hit_rate_ge3": 0.0, "blue_hit_rate": 0.0}
+        for agent in AGENT_TEAMS
+    }
+    window_reports = []
+
+    for w in valid_windows:
+        samples = list(iterate_archived_cycles(records, cycles=w))
+        if not samples:
+            window_reports.append({"window": w, "samples": 0, "avg_score": 0.0})
+            continue
+        window_scores = []
+        window_weight_sum = 0.0
+        for idx, (history_timeline, target) in enumerate(samples):
+            history = list(reversed(history_timeline))
+            round_weight = decay_gamma ** (len(samples) - idx - 1)
+            team_round_scores = []
+            for agent in AGENT_TEAMS:
+                red, blue = generate_prediction(history, strategy=agent, rng=random.Random())
+                score = _ticket_score(red, blue, target)
+                red_hits = len(set(red) & set(target["red_balls"]))
+                blue_hit = 1 if blue == target["blue_ball"] else 0
+                by_agent[agent]["samples"] += round_weight
+                by_agent[agent]["avg_score"] += score * round_weight
+                by_agent[agent]["hit_rate_ge2"] += (1.0 if red_hits >= 2 else 0.0) * round_weight
+                by_agent[agent]["hit_rate_ge3"] += (1.0 if red_hits >= 3 else 0.0) * round_weight
+                by_agent[agent]["blue_hit_rate"] += blue_hit * round_weight
+                team_round_scores.append(score)
+            team_avg = sum(team_round_scores) / len(team_round_scores)
+            red_ge2 = sum(1 for s in team_round_scores if s >= 2.0) / len(team_round_scores)
+            red_ge3 = sum(1 for s in team_round_scores if s >= 3.0) / len(team_round_scores)
+            blue_rate = sum(1 for s in team_round_scores if s % 1.0 >= 0.5) / len(team_round_scores)
+            overall["samples"] += round_weight
+            overall["avg_score"] += team_avg * round_weight
+            overall["hit_rate_ge2"] += red_ge2 * round_weight
+            overall["hit_rate_ge3"] += red_ge3 * round_weight
+            overall["blue_hit_rate"] += blue_rate * round_weight
+            window_scores.append(team_avg)
+            window_weight_sum += round_weight
+        window_reports.append(
+            {
+                "window": w,
+                "samples": len(samples),
+                "avg_score": round(sum(window_scores) / len(window_scores), 4) if window_scores else 0.0,
+            }
+        )
+
+    if overall["samples"] > 0:
+        for key in ["avg_score", "hit_rate_ge2", "hit_rate_ge3", "blue_hit_rate"]:
+            overall[key] = round(overall[key] / overall["samples"], 4)
+        overall["samples"] = int(round(overall["samples"]))
+    for agent in AGENT_TEAMS:
+        denom = by_agent[agent]["samples"]
+        if denom <= 0:
+            continue
+        for key in ["avg_score", "hit_rate_ge2", "hit_rate_ge3", "blue_hit_rate"]:
+            by_agent[agent][key] = round(by_agent[agent][key] / denom, 4)
+        by_agent[agent]["samples"] = int(round(denom))
+
+    return {"overall": overall, "by_agent": by_agent, "window_reports": window_reports}
 
 
 def _weighted_unique_sample(pool_scores: Dict[int, float], k: int, rng: random.Random) -> List[int]:
@@ -561,17 +791,29 @@ def save_compact_prediction(
     ensure_archive_dir()
     file_path = _archive_file_path(target_period)
     ticket_lines = []
+    explain_lines = []
+    explain_json_lines = []
     for index, ticket in enumerate(tickets, start=1):
         red_text = " ".join(f"{n:02d}" for n in ticket["red"])
         blue_text = f"{int(ticket['blue']):02d}"
         source_text = ",".join(ticket.get("sources", []))
         ticket_lines.append(f"ticket{index}={red_text}+{blue_text}|{source_text}")
+        explain_text = str(ticket.get("explain", "")).replace("\n", " ").strip()
+        if explain_text:
+            explain_lines.append(f"ticket{index}_explain={explain_text}")
+        explain_json = ticket.get("explain_json")
+        if explain_json is not None:
+            explain_json_lines.append(
+                f"ticket{index}_explain_json={json.dumps(explain_json, ensure_ascii=False, separators=(',', ':'))}"
+            )
     lines = [
         f"period={target_period}",
         f"generated_at={datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"ticket_count={len(tickets)}",
         f"lead_summary={lead_summary}",
         *ticket_lines,
+        *explain_lines,
+        *explain_json_lines,
     ]
     with open(file_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -693,11 +935,14 @@ def judge_with_lead_agent(
     diff_factor: float,
     ticket_index: int,
     seed: Optional[int],
+    existing_tickets: Optional[List[Dict[str, object]]] = None,
 ) -> Optional[Dict[str, object]]:
     red_scores = {i: 0.0 for i in range(1, 34)}
     blue_scores = {i: 0.0 for i in range(1, 17)}
     red_sources, blue_sources = _ball_sources(teams, ticket_index)
     valid_agents: List[str] = []
+    red_agent_contrib: Dict[int, Dict[str, float]] = {i: {} for i in range(1, 34)}
+    blue_agent_contrib: Dict[int, Dict[str, float]] = {i: {} for i in range(1, 17)}
 
     for agent, payload in teams.items():
         proposals = payload.get("proposals", [])
@@ -710,25 +955,112 @@ def judge_with_lead_agent(
         final_weight = base_weight * (1 + diff_bonus)
         for red in proposal["red"]:
             agreement_bonus = len(red_sources.get(red, [])) * 0.08
-            red_scores[red] += final_weight * (1 + agreement_bonus)
+            contribution = final_weight * (1 + agreement_bonus)
+            red_scores[red] += contribution
+            red_agent_contrib[red][agent] = red_agent_contrib[red].get(agent, 0.0) + contribution
         blue = proposal["blue"]
         agreement_bonus = len(blue_sources.get(blue, [])) * 0.1
-        blue_scores[blue] += final_weight * (1 + agreement_bonus)
+        contribution = final_weight * (1 + agreement_bonus)
+        blue_scores[blue] += contribution
+        blue_agent_contrib[blue][agent] = blue_agent_contrib[blue].get(agent, 0.0) + contribution
 
     if not valid_agents:
         return None
     rng = random.Random((seed or random.randint(1, 999999)) + ticket_index * 17)
-    final_red = _weighted_unique_sample(red_scores, 6, rng)
+    diversified_scores = dict(red_scores)
+    existing_tickets = existing_tickets or []
+    for ticket in existing_tickets:
+        reds = ticket.get("red", [])
+        for ball in reds:
+            diversified_scores[ball] = diversified_scores.get(ball, 0.0) * 0.62
+    final_red = _weighted_unique_sample(diversified_scores, 6, rng)
+    diversity_replacements: List[str] = []
+    if existing_tickets:
+        attempts = 0
+        while attempts < 4 and any(len(set(final_red) & set(t.get("red", []))) > 4 for t in existing_tickets):
+            overlap_counts = Counter()
+            for ticket in existing_tickets:
+                overlap = set(final_red) & set(ticket.get("red", []))
+                for ball in overlap:
+                    overlap_counts[ball] += 1
+            if not overlap_counts:
+                break
+            drop_ball = max(overlap_counts.items(), key=lambda x: x[1])[0]
+            candidates = [n for n in range(1, 34) if n not in final_red]
+            candidates.sort(
+                key=lambda n: (
+                    sum(1 for t in existing_tickets if n in t.get("red", [])),
+                    -diversified_scores.get(n, 0.0),
+                )
+            )
+            if candidates:
+                old_ball = drop_ball
+                new_ball = candidates[0]
+                final_red.remove(drop_ball)
+                final_red.append(new_ball)
+                final_red = sorted(set(final_red))
+                while len(final_red) < 6:
+                    refill = next((n for n in range(1, 34) if n not in final_red), None)
+                    if refill is None:
+                        break
+                    final_red.append(refill)
+                final_red = sorted(final_red[:6])
+                diversity_replacements.append(f"{old_ball:02d}->{new_ball:02d}")
+            attempts += 1
     final_blue = _weighted_choice(blue_scores, rng)
     source_agents = sorted(set(red_sources.get(ball, [])[0] for ball in final_red if red_sources.get(ball)))
     if final_blue in blue_sources:
         source_agents.extend(blue_sources[final_blue])
     source_agents = sorted(set(source_agents))
+    red_contrib_parts = []
+    red_contrib_json = []
+    for ball in final_red:
+        contribs = red_agent_contrib.get(ball, {})
+        top_agent, top_score = ("na", 0.0)
+        if contribs:
+            top_agent, top_score = max(contribs.items(), key=lambda x: x[1])
+        red_contrib_parts.append(f"{ball:02d}:{top_agent}({top_score:.3f})")
+        red_contrib_json.append(
+            {
+                "ball": int(ball),
+                "top_agent": top_agent,
+                "top_contribution": round(float(top_score), 6),
+                "agent_contributions": {
+                    a: round(float(s), 6) for a, s in sorted(contribs.items(), key=lambda x: x[1], reverse=True)
+                },
+            }
+        )
+    blue_contribs = blue_agent_contrib.get(final_blue, {})
+    blue_agent, blue_score = ("na", 0.0)
+    if blue_contribs:
+        blue_agent, blue_score = max(blue_contribs.items(), key=lambda x: x[1])
+    explain = (
+        f"来源Agent={','.join(source_agents or valid_agents)};"
+        f"红球贡献={','.join(red_contrib_parts)};"
+        f"蓝球贡献={final_blue:02d}:{blue_agent}({blue_score:.3f});"
+        f"多样性替换={','.join(diversity_replacements) if diversity_replacements else '无'}"
+    )
+    explain_json = {
+        "sources": source_agents or valid_agents,
+        "red": red_contrib_json,
+        "blue": {
+            "ball": int(final_blue),
+            "top_agent": blue_agent,
+            "top_contribution": round(float(blue_score), 6),
+            "agent_contributions": {
+                a: round(float(s), 6) for a, s in sorted(blue_contribs.items(), key=lambda x: x[1], reverse=True)
+            },
+        },
+        "diversity_replacements": diversity_replacements,
+    }
     return {
         "red": final_red,
         "blue": final_blue,
         "sources": source_agents or valid_agents,
         "valid_agents": sorted(valid_agents),
+        "explain": explain,
+        "explain_json": explain_json,
+        "diversity_replacements": diversity_replacements,
     }
 
 
@@ -804,6 +1136,8 @@ def main():
                        help='主Agent差异学习回看期数（仅team模式生效）')
     parser.add_argument('--seed', type=int, default=None,
                        help='随机种子（用于复现实验）')
+    parser.add_argument('--weight-patch', default=None,
+                       help='权重补丁文件路径（来自 analyze_archive 导出的 weight_patch.json）')
     parser.add_argument('--advanced', '-adv', action='store_true',
                        help='使用高级综合分析（时间加权+关联分析+模式识别+遗传算法）')
     
@@ -839,10 +1173,22 @@ def main():
     if args.mode == 'team':
         latest_archive = load_latest_archive()
         gap_result = evaluate_last_prediction_gap(latest_archive, records[0])
-        lead_model = train_lead_agent(records, learning_cycles=args.learn_cycles)
+        resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
+        initial_weights = load_weight_patch(resolved_patch_path)
+        lead_model = train_lead_agent(
+            records,
+            learning_cycles=args.learn_cycles,
+            initial_weights=initial_weights,
+        )
+        backtest = backtest_report(records, learning_cycles=args.learn_cycles)
         diff_factor = float(gap_result["factor"])
         print(f"\n🤖 多Agent团队模式（回看 {args.learn_cycles} 期进行差异学习）")
         print(f"🧠 主Agent差异学习: {gap_result['summary']}")
+        if resolved_patch_path:
+            if initial_weights:
+                print(f"🧩 已应用权重补丁: {resolved_patch_path}")
+            else:
+                print(f"⚠️ 权重补丁不可用，已忽略: {resolved_patch_path}")
         print("👑 主Agent学习权重:")
         for agent, weight in sorted(lead_model["weights"].items(), key=lambda x: x[1], reverse=True):
             diff = lead_model["diff_scores"][agent]
@@ -862,6 +1208,10 @@ def main():
         print(f"  - 权重稳定度: {lead_report['stability']:.3f}")
         print(f"  - 团队健康度: {len(lead_report['healthy_agents'])}/{len(AGENT_TEAMS)}")
         print(f"  - TOP3画像: {top3_text}")
+        print(
+            f"  - 回测总览: 样本 {backtest['overall']['samples']} | 平均分 {backtest['overall']['avg_score']:.3f} | "
+            f"红2+命中率 {backtest['overall']['hit_rate_ge2']:.2%} | 蓝球命中率 {backtest['overall']['blue_hit_rate']:.2%}"
+        )
 
         print("\n团队融合结果:")
         target_period = next_target_period(records)
@@ -873,21 +1223,33 @@ def main():
                 diff_factor=diff_factor,
                 ticket_index=i,
                 seed=args.seed,
+                existing_tickets=final_tickets,
             )
             if not final_ticket:
                 red, blue = generate_team_prediction(records, lead_model, rng=rng)
                 sources = []
+                explain = "来源Agent=fallback;红球贡献=na;蓝球贡献=na;多样性替换=无"
+                explain_json = {
+                    "sources": ["fallback"],
+                    "red": [],
+                    "blue": {"ball": int(blue), "top_agent": "fallback", "top_contribution": 0.0, "agent_contributions": {}},
+                    "diversity_replacements": [],
+                }
             else:
                 red, blue = final_ticket["red"], final_ticket["blue"]
                 sources = final_ticket["sources"]
+                explain = final_ticket.get("explain", "")
+                explain_json = final_ticket.get("explain_json")
             source_text = ",".join(sources) if sources else "fallback"
             print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d} | 来源 {source_text}")
             final_tickets.append({
                 "red": red,
                 "blue": blue,
                 "sources": sources or ["fallback"],
+                "explain": explain,
+                "explain_json": explain_json,
             })
-        summary = f"factor={diff_factor:.2f};mode=team;agents={','.join(lead_report['healthy_agents'])};report={lead_report['archive_summary']}"
+        summary = build_archive_lead_summary(diff_factor, lead_report, patch_source=patch_source)
         saved_path = save_compact_prediction(target_period, final_tickets, summary)
         print(f"\n💾 已归档本期精简预测: {saved_path}")
     else:
