@@ -118,6 +118,7 @@ python predict.py --help
 - `--advanced, -adv`: 使用高级综合分析
 - `--learn-cycles`: 团队模式回看期数（默认24期）
 - `--seed`: 随机种子（用于复现实验）
+- `--weight-patch`: 显式指定权重补丁路径（未指定时自动尝试 `config/weight_patch.latest.json`）
 
 ### 3. manual_data_import.py - 手动数据导入
 
@@ -133,6 +134,27 @@ python manual_data_import.py --csv data.csv
 # 导入TXT格式
 python manual_data_import.py --txt data.txt
 ```
+
+### 4. analyze_archive.py - 归档分析与补丁导出
+
+读取 `prediction_archive` 中的 `ticketN_explain_json`，输出贡献排行、双视角差异、建议权重增减量，并可导出 JSON/CSV/权重补丁。
+
+```bash
+# 基础分析
+python analyze_archive.py --archive-dir prediction_archive
+
+# 导出报告 + 写回最新补丁
+python analyze_archive.py \
+  --archive-dir prediction_archive \
+  --export-prefix prediction_archive/analysis_report \
+  --latest-patch-path config/weight_patch.latest.json
+```
+
+**参数说明**：
+- `--recent-limit`: 最近N张票据视角（用于“最近N期 vs 全历史”对比）
+- `--suggest-step`: 建议权重变动幅度上限（默认0.02）
+- `--export-prefix`: 导出报告路径前缀（生成 `.json`/`.csv`/`.weight_patch.json`）
+- `--latest-patch-path`: 固定写回最新补丁路径（默认 `config/weight_patch.latest.json`）
 
 ## 预测策略
 
