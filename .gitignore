@@ -52,5 +52,4 @@ playwright/.cache/
 *.log
 
 # Project specific
-prediction_archive/
 .trae/
