@@ -32,8 +32,8 @@ def load_data():
         return json.load(f)
 
 
-def analyze_hot_cold(records, recent_periods=30):
-    """冷热号分析 - 优化：增加蓝球冷号分析"""
+def analyze_hot_cold(records, recent_periods=40):
+    """冷热号分析 - 优化：增加蓝球冷号分析；扩大窗口至40期捕捉更长趋势"""
     recent = records[:recent_periods]
     red_counts = Counter()
     blue_counts = Counter()
@@ -565,7 +565,7 @@ def train_lead_agent(
     learning_rate: float = 0.15,
     window_sizes: Optional[Tuple[int, ...]] = None,
     window_weights: Optional[Tuple[float, ...]] = None,
-    decay_gamma: float = 0.92,
+    decay_gamma: float = 0.88,  # 微调：降低增强近期权重，应对冷号回补现象
     initial_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """主Agent差异学习：多窗口回测 + 时间衰减动态赋权。"""
