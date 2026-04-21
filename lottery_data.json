@@ -1,12 +1,25 @@
 {
   "metadata": {
-    "total_records": 309,
-    "date_range": "2024-04-04 至 2026-04-19",
-    "last_updated": "2026-04-21 19:15:46",
+    "total_records": 310,
+    "date_range": "2024-04-04 至 2026-04-21",
+    "last_updated": "2026-04-21 22:31:20",
     "source": "500.com-real",
     "is_real": true
   },
   "records": [
+    {
+      "period": "2026044",
+      "date": "2026-04-21",
+      "red_balls": [
+        2,
+        14,
+        17,
+        18,
+        22,
+        30
+      ],
+      "blue_ball": 1
+    },
     {
       "period": "2026043",
       "date": "2026-04-19",

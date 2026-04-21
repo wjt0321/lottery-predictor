@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "origin": "analyze_archive",
+  "pool_params": {
+    "core_red_pool_size": 10,
+    "core_blue_pool_size": 3
+  },
+  "fusion_params": {
+    "ticket_decay_step": 0.08,
+    "min_ticket_decay": 0.65,
+    "diversity_trigger_rate": 0.0
+  },
+  "matrix_params": {
+    "matrix_type": "10_red_guard_6_to_5",
+    "preferred_rows": []
+  }
+}

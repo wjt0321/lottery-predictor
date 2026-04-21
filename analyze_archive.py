@@ -118,6 +118,69 @@ def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, obje
     return ranking
 
 
+def build_matrix_row_ranking(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[tuple, Dict[str, float]] = {}
+    for row in records:
+        payload = row.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        matrix = payload.get("matrix", {})
+        actual_result = payload.get("actual_result", {})
+        if not isinstance(matrix, dict) or not isinstance(actual_result, dict):
+            continue
+        if not {"red_hits", "blue_hit", "hit_score"}.issubset(actual_result.keys()):
+            continue
+        row_id = matrix.get("row_id")
+        matrix_type = str(matrix.get("type", "")).strip()
+        if not row_id or not matrix_type:
+            continue
+        try:
+            row_id = int(row_id)
+            red_hits = float(actual_result.get("red_hits", 0.0))
+            blue_hit = float(actual_result.get("blue_hit", 0.0))
+            hit_score = float(actual_result.get("hit_score", 0.0))
+        except Exception:
+            continue
+        key = (matrix_type, row_id)
+        bucket = grouped.setdefault(
+            key,
+            {
+                "matrix_type": matrix_type,
+                "row_id": row_id,
+                "samples": 0.0,
+                "red_hits_total": 0.0,
+                "blue_hits_total": 0.0,
+                "hit_ge2_total": 0.0,
+                "hit_ge3_total": 0.0,
+                "score_total": 0.0,
+            },
+        )
+        bucket["samples"] += 1.0
+        bucket["red_hits_total"] += red_hits
+        bucket["blue_hits_total"] += blue_hit
+        bucket["hit_ge2_total"] += 1.0 if red_hits >= 2 else 0.0
+        bucket["hit_ge3_total"] += 1.0 if red_hits >= 3 else 0.0
+        bucket["score_total"] += hit_score
+
+    ranking = []
+    for bucket in grouped.values():
+        samples = bucket["samples"] or 1.0
+        ranking.append(
+            {
+                "matrix_type": bucket["matrix_type"],
+                "row_id": int(bucket["row_id"]),
+                "samples": int(samples),
+                "red_hit_avg": round(bucket["red_hits_total"] / samples, 6),
+                "blue_hit_rate": round(bucket["blue_hits_total"] / samples, 6),
+                "hit_rate_ge2": round(bucket["hit_ge2_total"] / samples, 6),
+                "hit_rate_ge3": round(bucket["hit_ge3_total"] / samples, 6),
+                "avg_score": round(bucket["score_total"] / samples, 6),
+            }
+        )
+    ranking.sort(key=lambda row: (-float(row["avg_score"]), -float(row["red_hit_avg"]), int(row["row_id"])))
+    return ranking
+
+
 def build_tuning_suggestions(ranking: List[Dict[str, object]], records: List[Dict[str, object]]) -> List[str]:
     lines: List[str] = []
     if not records:
@@ -244,7 +307,102 @@ def build_weight_patch_payload(
     }
 
 
+def build_matrix_patch_payload(matrix_ranking: List[Dict[str, object]]) -> Dict[str, object]:
+    if not matrix_ranking:
+        return {
+            "version": 1,
+            "matrix_type": "",
+            "row_weights": {},
+            "row_scores": {},
+            "origin": "analyze_archive",
+        }
+    matrix_type = str(matrix_ranking[0].get("matrix_type", "")).strip()
+    score_map = {}
+    for row in matrix_ranking:
+        row_id = str(row.get("row_id"))
+        score_map[row_id] = max(float(row.get("avg_score", 0.0)), 0.0001)
+    row_weights = _normalize_weight_map(score_map)
+    return {
+        "version": 1,
+        "matrix_type": matrix_type,
+        "row_weights": {k: round(float(v), 6) for k, v in row_weights.items()},
+        "row_scores": {str(row.get("row_id")): round(float(row.get("avg_score", 0.0)), 6) for row in matrix_ranking},
+        "origin": "analyze_archive",
+    }
+
+
+def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: List[Dict[str, object]]) -> Dict[str, object]:
+    red_pool_sizes = []
+    blue_pool_sizes = []
+    diversity_trigger_count = 0
+    matrix_type = ""
+    for row in records:
+        payload = row.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        core_pool = payload.get("core_pool", {})
+        if isinstance(core_pool, dict):
+            red_pool = core_pool.get("red_pool", []) or []
+            blue_pool = core_pool.get("blue_pool", []) or []
+            if isinstance(red_pool, list) and red_pool:
+                red_pool_sizes.append(len(red_pool))
+            if isinstance(blue_pool, list) and blue_pool:
+                blue_pool_sizes.append(len(blue_pool))
+        replacements = payload.get("diversity_replacements", []) or []
+        if isinstance(replacements, list) and replacements:
+            diversity_trigger_count += 1
+        matrix = payload.get("matrix", {})
+        if isinstance(matrix, dict) and not matrix_type:
+            matrix_type = str(matrix.get("type", "")).strip()
+
+    total_records = max(len(records), 1)
+    avg_red_pool = max(red_pool_sizes) if red_pool_sizes else 10
+    avg_blue_pool = max(blue_pool_sizes) if blue_pool_sizes else 3
+    preferred_rows = [int(row.get("row_id")) for row in matrix_ranking[: min(3, len(matrix_ranking))] if row.get("row_id") is not None]
+    diversity_rate = diversity_trigger_count / total_records
+
+    return {
+        "version": 1,
+        "origin": "analyze_archive",
+        "pool_params": {
+            "core_red_pool_size": int(avg_red_pool),
+            "core_blue_pool_size": int(avg_blue_pool),
+        },
+        "fusion_params": {
+            "ticket_decay_step": 0.08,
+            "min_ticket_decay": 0.65,
+            "diversity_trigger_rate": round(diversity_rate, 6),
+        },
+        "matrix_params": {
+            "matrix_type": matrix_type or (str(matrix_ranking[0].get("matrix_type", "")) if matrix_ranking else ""),
+            "preferred_rows": preferred_rows,
+        },
+    }
+
+
 def write_latest_weight_patch(source_patch_path: str, latest_patch_path: str = "config/weight_patch.latest.json") -> str:
+    with open(source_patch_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    parent = os.path.dirname(latest_patch_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(latest_patch_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return latest_patch_path
+
+
+def write_latest_matrix_patch(source_patch_path: str, latest_patch_path: str = "config/matrix_patch.latest.json") -> str:
+    with open(source_patch_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    parent = os.path.dirname(latest_patch_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(latest_patch_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return latest_patch_path
+
+
+def write_latest_param_patch(source_patch_path: str, latest_patch_path: str = "config/param_patch.latest.json") -> str:
     with open(source_patch_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
     parent = os.path.dirname(latest_patch_path)
@@ -262,6 +420,8 @@ def export_reports(
     delta_ranking: List[Dict[str, object]],
     suggestions: List[str],
     weight_adjustments: Optional[List[Dict[str, object]]] = None,
+    matrix_ranking: Optional[List[Dict[str, object]]] = None,
+    records: Optional[List[Dict[str, object]]] = None,
 ) -> Dict[str, str]:
     base = export_prefix
     root, ext = os.path.splitext(base)
@@ -270,11 +430,14 @@ def export_reports(
     json_path = f"{base}.json"
     csv_path = f"{base}.csv"
     weight_patch_path = f"{base}.weight_patch.json"
+    matrix_patch_path = f"{base}.matrix_patch.json"
+    param_patch_path = f"{base}.param_patch.json"
     payload = {
         "all_time_ranking": all_time_ranking,
         "recent_ranking": recent_ranking,
         "delta_ranking": delta_ranking,
         "weight_adjustments": weight_adjustments or [],
+        "matrix_ranking": matrix_ranking or [],
         "suggestions": suggestions,
     }
     with open(json_path, "w", encoding="utf-8") as f:
@@ -303,7 +466,19 @@ def export_reports(
     patch_payload = build_weight_patch_payload(all_time_ranking, weight_adjustments or [])
     with open(weight_patch_path, "w", encoding="utf-8") as f:
         json.dump(patch_payload, f, ensure_ascii=False, indent=2)
-    return {"json": json_path, "csv": csv_path, "weight_patch": weight_patch_path}
+    matrix_patch_payload = build_matrix_patch_payload(matrix_ranking or [])
+    with open(matrix_patch_path, "w", encoding="utf-8") as f:
+        json.dump(matrix_patch_payload, f, ensure_ascii=False, indent=2)
+    param_patch_payload = build_param_patch_payload(records or [], matrix_ranking or [])
+    with open(param_patch_path, "w", encoding="utf-8") as f:
+        json.dump(param_patch_payload, f, ensure_ascii=False, indent=2)
+    return {
+        "json": json_path,
+        "csv": csv_path,
+        "weight_patch": weight_patch_path,
+        "matrix_patch": matrix_patch_path,
+        "param_patch": param_patch_path,
+    }
 
 
 def render_report(
@@ -319,6 +494,7 @@ def render_report(
     recent_ranking = build_agent_ranking(recent_records)
     delta_ranking = compute_dual_view_delta(recent_ranking, ranking)
     weight_adjustments = build_weight_adjustments(recent_ranking, ranking, step=suggest_step)
+    matrix_ranking = build_matrix_row_ranking(records)
     suggestions = build_tuning_suggestions(ranking, records)
 
     lines = []
@@ -341,6 +517,15 @@ def render_report(
     for idx, row in enumerate(weight_adjustments[: max(1, int(top_k))], start=1):
         lines.append(f"  {idx:02d}. {row['agent']:8s} 建议 Δw={row['weight_delta']:+.4f} | delta={row['delta']:+.6f}")
     lines.append("")
+    if matrix_ranking:
+        lines.append("矩阵行表现:")
+        for idx, row in enumerate(matrix_ranking[: max(1, int(top_k))], start=1):
+            lines.append(
+                f"  {idx:02d}. type={row['matrix_type']} | row={row['row_id']} | samples={row['samples']} | "
+                f"avg_score={row['avg_score']:.6f} | red_hit_avg={row['red_hit_avg']:.6f} | "
+                f"blue_hit_rate={row['blue_hit_rate']:.2%} | hit_rate_ge2={row['hit_rate_ge2']:.2%} | hit_rate_ge3={row['hit_rate_ge3']:.2%}"
+            )
+        lines.append("")
     lines.append("调参建议:")
     for item in suggestions:
         lines.append(f"  - {item}")
@@ -356,6 +541,8 @@ def main():
     parser.add_argument("--suggest-step", type=float, default=0.02, help="建议权重变动幅度上限（默认0.02）")
     parser.add_argument("--export-prefix", default=None, help="导出报告路径前缀（不带扩展名）")
     parser.add_argument("--latest-patch-path", default="config/weight_patch.latest.json", help="固定写回权重补丁路径")
+    parser.add_argument("--latest-matrix-patch-path", default="config/matrix_patch.latest.json", help="固定写回矩阵补丁路径")
+    parser.add_argument("--latest-param-patch-path", default="config/param_patch.latest.json", help="固定写回参数补丁路径")
     args = parser.parse_args()
     records = collect_explain_json_records(args.archive_dir, limit_files=args.limit_files)
     all_time_ranking = build_agent_ranking(records)
@@ -363,6 +550,7 @@ def main():
     recent_ranking = build_agent_ranking(recent_records)
     delta_ranking = compute_dual_view_delta(recent_ranking, all_time_ranking)
     weight_adjustments = build_weight_adjustments(recent_ranking, all_time_ranking, step=args.suggest_step)
+    matrix_ranking = build_matrix_row_ranking(records)
     suggestions = build_tuning_suggestions(all_time_ranking, records)
 
     print(
@@ -382,12 +570,20 @@ def main():
             delta_ranking=delta_ranking,
             suggestions=suggestions,
             weight_adjustments=weight_adjustments,
+            matrix_ranking=matrix_ranking,
+            records=records,
         )
         latest_path = write_latest_weight_patch(paths["weight_patch"], args.latest_patch_path)
+        latest_matrix_path = write_latest_matrix_patch(paths["matrix_patch"], args.latest_matrix_patch_path)
+        latest_param_path = write_latest_param_patch(paths["param_patch"], args.latest_param_patch_path)
         print(f"\n已导出 JSON: {paths['json']}")
         print(f"已导出 CSV : {paths['csv']}")
         print(f"已导出权重补丁: {paths['weight_patch']}")
+        print(f"已导出矩阵补丁: {paths['matrix_patch']}")
+        print(f"已导出参数补丁: {paths['param_patch']}")
         print(f"已写回最新补丁: {latest_path}")
+        print(f"已写回最新矩阵补丁: {latest_matrix_path}")
+        print(f"已写回最新参数补丁: {latest_param_path}")
 
 
 if __name__ == "__main__":

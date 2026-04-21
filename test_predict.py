@@ -458,6 +458,57 @@ class PredictFlowTests(unittest.TestCase):
             self.assertIsNone(path3)
             self.assertEqual(source3, "none")
 
+    def test_load_param_patch_merges_runtime_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            patch_path = os.path.join(temp_dir, "param_patch.latest.json")
+            payload = {
+                "pool_params": {"core_red_pool_size": 10, "core_blue_pool_size": 4},
+                "fusion_params": {"ticket_decay_step": 0.12},
+                "matrix_params": {"preferred_rows": [5, 3, 1], "matrix_type": "10_red_guard_6_to_5"},
+            }
+            with open(patch_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            loaded = predict.load_param_patch(patch_path)
+            self.assertEqual(loaded["pool_params"]["core_red_pool_size"], 10)
+            self.assertEqual(loaded["pool_params"]["core_blue_pool_size"], 4)
+            self.assertEqual(loaded["fusion_params"]["ticket_decay_step"], 0.12)
+            self.assertEqual(loaded["fusion_params"]["min_ticket_decay"], predict.DEFAULT_RUNTIME_CONFIG["fusion_params"]["min_ticket_decay"])
+            self.assertEqual(loaded["matrix_params"]["preferred_rows"], [5, 3, 1])
+
+    def test_generate_rotation_matrix_tickets_respects_preferred_rows(self):
+        snapshot = {
+            "red_pool": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "blue_pool": [3, 5],
+            "red_scores": {n: 1.0 for n in range(1, 11)},
+            "blue_scores": {3: 1.0, 5: 0.8},
+            "pool_sources": {n: ["hot", "balanced"] for n in range(1, 11)},
+            "blue_sources": {3: ["hot"], 5: ["balanced"]},
+            "red_agent_contrib": {n: {"hot": 1.0} for n in range(1, 11)},
+            "blue_agent_contrib": {3: {"hot": 1.0}, 5: {"balanced": 0.8}},
+            "valid_agents": ["hot", "balanced"],
+        }
+        runtime_config = {
+            "pool_params": {"core_red_pool_size": 10, "core_blue_pool_size": 2},
+            "fusion_params": {"ticket_decay_step": 0.08, "min_ticket_decay": 0.65},
+            "matrix_params": {"matrix_type": "10_red_guard_6_to_5", "preferred_rows": [5, 3, 1, 2, 4], "row_weights": {"5": 0.4, "3": 0.25, "1": 0.2, "2": 0.1, "4": 0.05}},
+        }
+        tickets = predict.generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
+        self.assertEqual(len(tickets), 5)
+        self.assertEqual([ticket["matrix_row_id"] for ticket in tickets], [5, 3, 1, 2, 4])
+
+    def test_resolve_runtime_config_auto_discovers_param_and_matrix_patch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = os.path.join(temp_dir, "config")
+            os.makedirs(config_dir, exist_ok=True)
+            with open(os.path.join(config_dir, "param_patch.latest.json"), "w", encoding="utf-8") as f:
+                json.dump({"pool_params": {"core_blue_pool_size": 4}}, f, ensure_ascii=False)
+            with open(os.path.join(config_dir, "matrix_patch.latest.json"), "w", encoding="utf-8") as f:
+                json.dump({"matrix_type": "10_red_guard_6_to_5", "row_weights": {"5": 0.6}, "preferred_rows": [5, 3, 1, 2, 4]}, f, ensure_ascii=False)
+            runtime = predict.resolve_runtime_config(project_root=temp_dir)
+            self.assertEqual(runtime["pool_params"]["core_blue_pool_size"], 4)
+            self.assertEqual(runtime["matrix_params"]["preferred_rows"], [5, 3, 1, 2, 4])
+            self.assertEqual(runtime["matrix_params"]["row_weights"]["5"], 0.6)
+
     def test_build_archive_lead_summary_contains_patch_source(self):
         lead_report = {"healthy_agents": ["hot", "cold"], "archive_summary": "策略风格=保守"}
         summary = predict.build_archive_lead_summary(1.0, lead_report, patch_source="default")

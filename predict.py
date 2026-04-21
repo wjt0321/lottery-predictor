@@ -31,6 +31,21 @@ ROTATION_MATRIX_ROWS = (
     (1, 3, 5, 6, 8, 9),
     (2, 4, 5, 7, 8, 9),
 )
+DEFAULT_RUNTIME_CONFIG = {
+    "pool_params": {
+        "core_red_pool_size": CORE_RED_POOL_SIZE,
+        "core_blue_pool_size": CORE_BLUE_POOL_SIZE,
+    },
+    "fusion_params": {
+        "ticket_decay_step": 0.08,
+        "min_ticket_decay": 0.65,
+    },
+    "matrix_params": {
+        "matrix_type": ROTATION_MATRIX_TYPE,
+        "preferred_rows": [1, 2, 3, 4, 5],
+        "row_weights": {str(index + 1): 1.0 / len(ROTATION_MATRIX_ROWS) for index in range(len(ROTATION_MATRIX_ROWS))},
+    },
+}
 
 
 def load_data():
@@ -496,6 +511,76 @@ def resolve_weight_patch_path(explicit_path: Optional[str], project_root: Option
     return None, "none"
 
 
+def _deep_merge_dict(base: Dict[str, object], override: Dict[str, object]) -> Dict[str, object]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_param_patch(patch_path: Optional[str]) -> Dict[str, object]:
+    base_config = json.loads(json.dumps(DEFAULT_RUNTIME_CONFIG))
+    if not patch_path or not os.path.isfile(patch_path):
+        return base_config
+    try:
+        with open(patch_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return base_config
+    if not isinstance(payload, dict):
+        return base_config
+    merged = _deep_merge_dict(base_config, payload)
+    preferred_rows = merged.get("matrix_params", {}).get("preferred_rows", []) or []
+    merged["matrix_params"]["preferred_rows"] = [int(row) for row in preferred_rows if str(row).isdigit()]
+    return merged
+
+
+def load_matrix_patch(patch_path: Optional[str]) -> Dict[str, object]:
+    if not patch_path or not os.path.isfile(patch_path):
+        return {}
+    try:
+        with open(patch_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    matrix_type = str(payload.get("matrix_type", "")).strip()
+    row_weights = payload.get("row_weights", {}) or {}
+    preferred_rows = payload.get("preferred_rows", []) or []
+    cleaned_weights = {str(key): float(value) for key, value in row_weights.items() if str(key).isdigit()}
+    cleaned_rows = [int(row) for row in preferred_rows if str(row).isdigit()]
+    result = {"matrix_params": {}}
+    if matrix_type:
+        result["matrix_params"]["matrix_type"] = matrix_type
+    if cleaned_weights:
+        result["matrix_params"]["row_weights"] = cleaned_weights
+    if cleaned_rows:
+        result["matrix_params"]["preferred_rows"] = cleaned_rows
+    return result
+
+
+def find_default_param_patch(project_root: Optional[str] = None) -> Optional[str]:
+    root = project_root or os.getcwd()
+    candidate = os.path.join(root, "config", "param_patch.latest.json")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def find_default_matrix_patch(project_root: Optional[str] = None) -> Optional[str]:
+    root = project_root or os.getcwd()
+    candidate = os.path.join(root, "config", "matrix_patch.latest.json")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def resolve_runtime_config(project_root: Optional[str] = None) -> Dict[str, object]:
+    runtime = load_param_patch(find_default_param_patch(project_root=project_root))
+    matrix_overlay = load_matrix_patch(find_default_matrix_patch(project_root=project_root))
+    return _deep_merge_dict(runtime, matrix_overlay)
+
+
 def build_archive_lead_summary(diff_factor: float, lead_report: Dict[str, object], patch_source: str) -> str:
     healthy_agents = lead_report.get("healthy_agents", []) or []
     archive_summary = lead_report.get("archive_summary", "")
@@ -943,7 +1028,13 @@ def build_core_pool_snapshot(
     teams: Dict[str, Dict[str, object]],
     lead_model: Dict[str, Dict[str, float]],
     diff_factor: float,
+    runtime_config: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
+    core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
+    ticket_decay_step = float(runtime.get("fusion_params", {}).get("ticket_decay_step", 0.08))
+    min_ticket_decay = float(runtime.get("fusion_params", {}).get("min_ticket_decay", 0.65))
     red_scores = {i: 0.0 for i in range(1, 34)}
     blue_scores = {i: 0.0 for i in range(1, 17)}
     red_agent_contrib: Dict[int, Dict[str, float]] = {i: {} for i in range(1, 34)}
@@ -961,7 +1052,7 @@ def build_core_pool_snapshot(
         diff_bonus = max(0.0, lead_model["diff_scores"].get(agent, 0.0)) * 0.2
         final_weight = base_weight * (1 + diff_bonus)
         for proposal_index, proposal in enumerate(proposals):
-            ticket_decay = max(0.65, 1.0 - proposal_index * 0.08)
+            ticket_decay = max(min_ticket_decay, 1.0 - proposal_index * ticket_decay_step)
             weighted_score = final_weight * ticket_decay
             for red in proposal["red"]:
                 red_scores[red] += weighted_score
@@ -974,14 +1065,14 @@ def build_core_pool_snapshot(
 
     ranked_red = sorted(red_scores.items(), key=lambda item: (-item[1], item[0]))
     ranked_blue = sorted(blue_scores.items(), key=lambda item: (-item[1], item[0]))
-    red_pool = [ball for ball, score in ranked_red if score > 0][:CORE_RED_POOL_SIZE]
-    blue_pool = [ball for ball, score in ranked_blue if score > 0][:CORE_BLUE_POOL_SIZE]
+    red_pool = [ball for ball, score in ranked_red if score > 0][:core_red_pool_size]
+    blue_pool = [ball for ball, score in ranked_blue if score > 0][:core_blue_pool_size]
 
-    if len(red_pool) < CORE_RED_POOL_SIZE:
+    if len(red_pool) < core_red_pool_size:
         for ball, _ in ranked_red:
             if ball not in red_pool:
                 red_pool.append(ball)
-            if len(red_pool) >= CORE_RED_POOL_SIZE:
+            if len(red_pool) >= core_red_pool_size:
                 break
     if not blue_pool:
         blue_pool = [ball for ball, _ in ranked_blue[:1]] or [1]
@@ -999,19 +1090,28 @@ def build_core_pool_snapshot(
     }
 
 
-def generate_rotation_matrix_tickets(snapshot: Dict[str, object]) -> List[Dict[str, object]]:
-    red_pool = list(snapshot.get("red_pool", []))[:CORE_RED_POOL_SIZE]
+def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config: Optional[Dict[str, object]] = None) -> List[Dict[str, object]]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
+    matrix_type = str(runtime.get("matrix_params", {}).get("matrix_type", ROTATION_MATRIX_TYPE))
+    preferred_rows = runtime.get("matrix_params", {}).get("preferred_rows", []) or []
+    if not preferred_rows:
+        preferred_rows = [1, 2, 3, 4, 5]
+    row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= len(ROTATION_MATRIX_ROWS)]
+
+    red_pool = list(snapshot.get("red_pool", []))[:core_red_pool_size]
     blue_pool = list(snapshot.get("blue_pool", [])) or [1]
     pool_sources = snapshot.get("pool_sources", {}) or {}
     blue_sources = snapshot.get("blue_sources", {}) or {}
     red_agent_contrib = snapshot.get("red_agent_contrib", {}) or {}
     blue_agent_contrib = snapshot.get("blue_agent_contrib", {}) or {}
     valid_agents = list(snapshot.get("valid_agents", []))
-    if len(red_pool) < CORE_RED_POOL_SIZE:
+    if len(red_pool) < core_red_pool_size:
         return []
 
     tickets: List[Dict[str, object]] = []
-    for row_id, row in enumerate(ROTATION_MATRIX_ROWS, start=1):
+    for row_id in row_order:
+        row = ROTATION_MATRIX_ROWS[row_id - 1]
         final_red = sorted(red_pool[index] for index in row)
         final_blue = int(blue_pool[(row_id - 1) % len(blue_pool)])
         source_agents = set()
@@ -1043,7 +1143,7 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object]) -> List[Dict[s
             f"来源Agent={','.join(sorted(source_agents) or valid_agents)};"
             f"红球贡献={','.join(red_contrib_parts)};"
             f"蓝球贡献={final_blue:02d}:{blue_agent}({blue_score:.3f});"
-            f"矩阵类型={ROTATION_MATRIX_TYPE};"
+            f"矩阵类型={matrix_type};"
             f"矩阵行={row_id};"
             f"覆盖池位={','.join(str(index + 1) for index in row)}"
         )
@@ -1060,7 +1160,7 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object]) -> List[Dict[s
             },
             "diversity_replacements": [],
             "matrix": {
-                "type": ROTATION_MATRIX_TYPE,
+                "type": matrix_type,
                 "row_id": row_id,
                 "covered_pool_positions": [index + 1 for index in row],
             },
@@ -1088,9 +1188,10 @@ def generate_team_matrix_tickets(
     teams: Dict[str, Dict[str, object]],
     lead_model: Dict[str, Dict[str, float]],
     diff_factor: float,
+    runtime_config: Optional[Dict[str, object]] = None,
 ) -> List[Dict[str, object]]:
-    snapshot = build_core_pool_snapshot(teams, lead_model, diff_factor=diff_factor)
-    return generate_rotation_matrix_tickets(snapshot)
+    snapshot = build_core_pool_snapshot(teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config)
+    return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
 
 
 def judge_with_lead_agent(
@@ -1379,6 +1480,9 @@ def main():
         latest_archive = load_latest_archive()
         gap_result = evaluate_last_prediction_gap(latest_archive, records[0])
         resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
+        param_patch_path = find_default_param_patch()
+        matrix_patch_path = find_default_matrix_patch()
+        runtime_config = resolve_runtime_config()
         initial_weights = load_weight_patch(resolved_patch_path)
         lead_model = train_lead_agent(
             records,
@@ -1394,6 +1498,10 @@ def main():
                 print(f"🧩 已应用权重补丁: {resolved_patch_path}")
             else:
                 print(f"⚠️ 权重补丁不可用，已忽略: {resolved_patch_path}")
+        if param_patch_path:
+            print(f"🧪 已应用参数补丁: {param_patch_path}")
+        if matrix_patch_path:
+            print(f"🧭 已应用矩阵补丁: {matrix_patch_path}")
         print("👑 主Agent学习权重:")
         for agent, weight in sorted(lead_model["weights"].items(), key=lambda x: x[1], reverse=True):
             diff = lead_model["diff_scores"][agent]
@@ -1427,6 +1535,7 @@ def main():
             expert_teams,
             lead_model=lead_model,
             diff_factor=diff_factor,
+            runtime_config=runtime_config,
         )
         if not final_tickets:
             final_tickets = []
