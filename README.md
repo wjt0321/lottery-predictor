@@ -131,24 +131,43 @@ python manual_data_import.py --txt data.txt
 
 ### 4. analyze_archive.py - 归档分析与补丁导出
 
-读取 `prediction_archive` 中的 `ticketN_explain_json`，输出贡献排行、双视角差异、建议权重增减量，并可导出 JSON/CSV/权重补丁。
+读取 `prediction_archive` 中的 `ticketN_explain_json`，输出贡献排行、双视角差异、建议权重增减量、矩阵行表现，并可导出报告与三类补丁。
 
 ```bash
 # 基础分析
 python analyze_archive.py --archive-dir prediction_archive
 
+# 导出报告（生成 JSON / CSV / 三类 patch）
+python analyze_archive.py \
+  --archive-dir prediction_archive \
+  --export-prefix prediction_archive/analysis_report
+
 # 导出报告 + 写回最新补丁
 python analyze_archive.py \
   --archive-dir prediction_archive \
   --export-prefix prediction_archive/analysis_report \
-  --latest-patch-path config/weight_patch.latest.json
+  --latest-patch-path config/weight_patch.latest.json \
+  --latest-matrix-patch-path config/matrix_patch.latest.json \
+  --latest-param-patch-path config/param_patch.latest.json
 ```
 
 **参数说明**：
 - `--recent-limit`: 最近N张票据视角（用于“最近N期 vs 全历史”对比）
 - `--suggest-step`: 建议权重变动幅度上限（默认0.02）
-- `--export-prefix`: 导出报告路径前缀（生成 `.json`/`.csv`/`.weight_patch.json`）
-- `--latest-patch-path`: 固定写回最新补丁路径（默认 `config/weight_patch.latest.json`）
+- `--export-prefix`: 导出报告路径前缀，生成以下文件：
+  - `.json`
+  - `.csv`
+  - `.weight_patch.json`
+  - `.matrix_patch.json`
+  - `.param_patch.json`
+- `--latest-patch-path`: 固定写回最新权重补丁路径（默认 `config/weight_patch.latest.json`）
+- `--latest-matrix-patch-path`: 固定写回最新矩阵补丁路径（默认 `config/matrix_patch.latest.json`）
+- `--latest-param-patch-path`: 固定写回最新参数补丁路径（默认 `config/param_patch.latest.json`）
+
+**补丁文件说明**：
+- `weight patch`：用于调整 8 位专家的基础权重
+- `matrix patch`：用于记录矩阵行表现、行权重和偏好行顺序
+- `param patch`：用于回灌核心池大小、出票衰减参数和矩阵偏好参数
 
 ## 预测策略
 
@@ -173,8 +192,15 @@ python analyze_archive.py \
 ### 自学习闭环方向
 
 - 历史归档会保留每注解释信息，供后续回测分析
-- `analyze_archive.py` 可输出贡献排行、双视角差异与权重补丁
-- 后续建议扩展参数补丁，将“权重学习”升级为“权重 + 参数”联合学习
+- `analyze_archive.py` 目前可输出：
+  - 贡献排行
+  - 双视角差异
+  - 矩阵行表现
+  - `weight patch`
+  - `matrix patch`
+  - `param patch`
+- `predict.py` 在 `team` 模式下会自动尝试回灌最新补丁
+- 当前闭环已经从“权重学习”扩展到“权重 + 矩阵 + 参数”联合学习
 
 ### 旋转矩阵出票
 
@@ -204,8 +230,23 @@ python predict.py --advanced --num 5
 
 1. 每个Agent基于不同策略生成候选注
 2. 主Agent通过24期历史回测学习各Agent权重
-3. 动态融合生成最终预测
-4. 自动归档预测结果用于后续评估
+3. 系统聚合核心红球池和蓝球池
+4. 使用固定旋转矩阵输出 5 注
+5. 自动归档预测结果用于后续评估
+
+`team` 模式运行时的补丁回灌规则：
+
+- `weight patch`
+  - 支持显式指定：`--weight-patch config/weight_patch.latest.json`
+  - 未显式指定时，自动尝试 `config/weight_patch.latest.json`
+- `param patch`
+  - 当前不提供单独 CLI 参数
+  - 默认自动尝试 `config/param_patch.latest.json`
+- `matrix patch`
+  - 当前不提供单独 CLI 参数
+  - 默认自动尝试 `config/matrix_patch.latest.json`
+
+如果相关文件不存在，系统会自动回退到内置默认配置。
 
 ```bash
 python predict.py --mode team --num 5 --learn-cycles 24
@@ -250,10 +291,10 @@ python predict.py --mode team --num 5 --learn-cycles 24
 | 预测 | 指定策略复现实验 | `python predict.py --mode single --strategy hot --num 3 --seed 42` |
 | 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
 | 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
-| 分析 | 导出报告 + 自动写回最新补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report` |
+| 分析 | 导出报告 + 自动写回最新补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
 | 补丁回灌 | 显式加载权重补丁预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
-| 补丁回灌 | 默认自动发现并加载补丁 | `python predict.py --mode team --num 5` |
-| 补丁回灌 | 关闭自动发现（无补丁文件时） | `python predict.py --mode team --num 5`（未提供 `--weight-patch` 且 `config/weight_patch.latest.json` 不存在） |
+| 补丁回灌 | 默认自动发现并加载三类补丁 | `python predict.py --mode team --num 5` |
+| 补丁回灌 | 无补丁文件时使用默认配置 | `python predict.py --mode team --num 5`（若 `config/*.latest.json` 不存在则自动回退） |
 
 ## 文件结构
 
