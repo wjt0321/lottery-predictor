@@ -2,99 +2,99 @@
   "all_time_ranking": [
     {
       "agent": "zone",
-      "score": 20.587035,
-      "source_share": 0.3333,
-      "source_count": 12
+      "score": 36.219716,
+      "source_share": 0.4783,
+      "source_count": 22
     },
     {
       "agent": "hot",
-      "score": 18.096239,
-      "source_share": 0.9167,
-      "source_count": 33
+      "score": 30.415989,
+      "source_share": 0.9348,
+      "source_count": 43
     },
     {
       "agent": "balanced",
-      "score": 15.441132,
-      "source_share": 0.5833,
-      "source_count": 21
-    },
-    {
-      "agent": "random",
-      "score": 13.75089,
-      "source_share": 0.6944,
-      "source_count": 25
+      "score": 30.278647,
+      "source_share": 0.6739,
+      "source_count": 31
     },
     {
       "agent": "cycle",
-      "score": 12.69396,
-      "source_share": 0.5556,
-      "source_count": 20
+      "score": 23.669096,
+      "source_share": 0.6522,
+      "source_count": 30
+    },
+    {
+      "agent": "random",
+      "score": 22.558156,
+      "source_share": 0.7609,
+      "source_count": 35
     },
     {
       "agent": "missing",
-      "score": 11.411859,
-      "source_share": 0.7222,
-      "source_count": 26
+      "score": 20.946009,
+      "source_share": 0.7826,
+      "source_count": 36
     },
     {
       "agent": "cold",
-      "score": 9.718483,
-      "source_share": 0.8889,
-      "source_count": 32
+      "score": 18.481694,
+      "source_share": 0.913,
+      "source_count": 42
     },
     {
       "agent": "sum",
-      "score": 8.748383,
-      "source_share": 0.4722,
-      "source_count": 17
+      "score": 13.636834,
+      "source_share": 0.587,
+      "source_count": 27
     }
   ],
   "recent_ranking": [
     {
       "agent": "zone",
-      "score": 15.178839,
-      "source_share": 0.35,
-      "source_count": 7
-    },
-    {
-      "agent": "hot",
-      "score": 13.643649,
-      "source_share": 0.9,
-      "source_count": 18
-    },
-    {
-      "agent": "balanced",
-      "score": 10.702319,
-      "source_share": 0.6,
-      "source_count": 12
-    },
-    {
-      "agent": "cycle",
-      "score": 9.9247,
-      "source_share": 0.6,
-      "source_count": 12
-    },
-    {
-      "agent": "random",
-      "score": 9.430546,
-      "source_share": 0.65,
-      "source_count": 13
-    },
-    {
-      "agent": "missing",
-      "score": 8.495268,
+      "score": 24.320394,
       "source_share": 0.75,
       "source_count": 15
     },
     {
+      "agent": "balanced",
+      "score": 20.665323,
+      "source_share": 0.85,
+      "source_count": 17
+    },
+    {
+      "agent": "hot",
+      "score": 19.900532,
+      "source_share": 0.95,
+      "source_count": 19
+    },
+    {
+      "agent": "cycle",
+      "score": 15.979987,
+      "source_share": 0.9,
+      "source_count": 18
+    },
+    {
+      "agent": "missing",
+      "score": 14.610013,
+      "source_share": 0.95,
+      "source_count": 19
+    },
+    {
+      "agent": "random",
+      "score": 13.976948,
+      "source_share": 0.85,
+      "source_count": 17
+    },
+    {
       "agent": "cold",
-      "score": 6.900252,
+      "score": 11.824572,
       "source_share": 0.9,
       "source_count": 18
     },
     {
       "agent": "sum",
-      "score": 6.267926,
+      "score": 8.056083,
       "source_share": 0.65,
       "source_count": 13
     }
@@ -102,92 +102,92 @@
   "delta_ranking": [
     {
       "agent": "sum",
-      "recent_score": 6.267926,
-      "all_time_score": 8.748383,
-      "delta": -2.480457
-    },
-    {
-      "agent": "cycle",
-      "recent_score": 9.9247,
-      "all_time_score": 12.69396,
-      "delta": -2.76926
-    },
-    {
-      "agent": "cold",
-      "recent_score": 6.900252,
-      "all_time_score": 9.718483,
-      "delta": -2.818231
+      "recent_score": 8.056083,
+      "all_time_score": 13.636834,
+      "delta": -5.580751
     },
     {
       "agent": "missing",
-      "recent_score": 8.495268,
-      "all_time_score": 11.411859,
-      "delta": -2.916591
+      "recent_score": 14.610013,
+      "all_time_score": 20.946009,
+      "delta": -6.335996
+    },
+    {
+      "agent": "cold",
+      "recent_score": 11.824572,
+      "all_time_score": 18.481694,
+      "delta": -6.657122
+    },
+    {
+      "agent": "cycle",
+      "recent_score": 15.979987,
+      "all_time_score": 23.669096,
+      "delta": -7.689109
     },
     {
       "agent": "random",
-      "recent_score": 9.430546,
-      "all_time_score": 13.75089,
-      "delta": -4.320344
-    },
-    {
-      "agent": "hot",
-      "recent_score": 13.643649,
-      "all_time_score": 18.096239,
-      "delta": -4.45259
+      "recent_score": 13.976948,
+      "all_time_score": 22.558156,
+      "delta": -8.581208
     },
     {
       "agent": "balanced",
-      "recent_score": 10.702319,
-      "all_time_score": 15.441132,
-      "delta": -4.738813
+      "recent_score": 20.665323,
+      "all_time_score": 30.278647,
+      "delta": -9.613324
+    },
+    {
+      "agent": "hot",
+      "recent_score": 19.900532,
+      "all_time_score": 30.415989,
+      "delta": -10.515457
     },
     {
       "agent": "zone",
-      "recent_score": 15.178839,
-      "all_time_score": 20.587035,
-      "delta": -5.408196
+      "recent_score": 24.320394,
+      "all_time_score": 36.219716,
+      "delta": -11.899322
     }
   ],
   "weight_adjustments": [
     {
       "agent": "sum",
-      "delta": -2.480457,
-      "weight_delta": -0.0092
-    },
-    {
-      "agent": "cycle",
-      "delta": -2.76926,
-      "weight_delta": -0.0102
-    },
-    {
-      "agent": "cold",
-      "delta": -2.818231,
-      "weight_delta": -0.0104
+      "delta": -5.580751,
+      "weight_delta": -0.0094
     },
     {
       "agent": "missing",
-      "delta": -2.916591,
-      "weight_delta": -0.0108
+      "delta": -6.335996,
+      "weight_delta": -0.0106
+    },
+    {
+      "agent": "cold",
+      "delta": -6.657122,
+      "weight_delta": -0.0112
+    },
+    {
+      "agent": "cycle",
+      "delta": -7.689109,
+      "weight_delta": -0.0129
     },
     {
       "agent": "random",
-      "delta": -4.320344,
-      "weight_delta": -0.016
-    },
-    {
-      "agent": "hot",
-      "delta": -4.45259,
-      "weight_delta": -0.0165
+      "delta": -8.581208,
+      "weight_delta": -0.0144
     },
     {
       "agent": "balanced",
-      "delta": -4.738813,
-      "weight_delta": -0.0175
+      "delta": -9.613324,
+      "weight_delta": -0.0162
+    },
+    {
+      "agent": "hot",
+      "delta": -10.515457,
+      "weight_delta": -0.0177
     },
     {
       "agent": "zone",
-      "delta": -5.408196,
+      "delta": -11.899322,
       "weight_delta": -0.02
     }
   ],

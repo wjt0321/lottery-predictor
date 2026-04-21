@@ -189,26 +189,6 @@ python analyze_archive.py \
 | `sum` | 和值趋势策略 | 基于历史平均和值±标准差预测 |
 | `zone` | 区间平衡策略 | 分析1-11/12-22/23-33三区分布均衡 |
 
-### 自学习闭环方向
-
-- 历史归档会保留每注解释信息，供后续回测分析
-- `analyze_archive.py` 目前可输出：
-  - 贡献排行
-  - 双视角差异
-  - 矩阵行表现
-  - `weight patch`
-  - `matrix patch`
-  - `param patch`
-- `predict.py` 在 `team` 模式下会自动尝试回灌最新补丁
-- 当前闭环已经从“权重学习”扩展到“权重 + 矩阵 + 参数”联合学习
-
-### 旋转矩阵出票
-
-- `team` 模式不再把专家提案直接随机打散成多注
-- 系统会先汇总出 `10` 个核心红球与少量蓝球候选池
-- 随后使用固定 `5` 行旋转矩阵，把核心池压缩为 `5` 注 `6+1`
-- 这样可以尽量保留号码池价值，避免在拆票阶段把高价值号码关系随机稀释
-
 ## 高级分析模块
 
 ### 综合分析（--advanced）
@@ -224,18 +204,34 @@ python analyze_archive.py \
 python predict.py --advanced --num 5
 ```
 
-### 团队模式（--mode team）
+### 团队模式与自学习闭环（--mode team）
 
-8个AI Agent协同工作：
+`team` 模式是当前项目的主链路，由 8 个专家协同工作，并串联“出号 -> 归档 -> 分析 -> 补丁回灌”的闭环。
 
-1. 每个Agent基于不同策略生成候选注
-2. 主Agent通过24期历史回测学习各Agent权重
+#### 1. 团队模式流程
+
+1. 每个专家基于不同策略生成候选注
+2. 主 Agent 通过历史回测学习专家权重
 3. 系统聚合核心红球池和蓝球池
-4. 使用固定旋转矩阵输出 5 注
+4. 使用固定旋转矩阵输出 5 注 `6+1`
 5. 自动归档预测结果用于后续评估
 
-`team` 模式运行时的补丁回灌规则：
+#### 2. 旋转矩阵出票
 
+- `team` 模式不再把专家提案直接随机打散成多注
+- 系统会先汇总出 `10` 个核心红球与少量蓝球候选池
+- 随后使用固定 `5` 行旋转矩阵，把核心池压缩为 `5` 注 `6+1`
+- 这样可以尽量保留号码池价值，避免在拆票阶段把高价值号码关系随机稀释
+
+#### 3. 自学习闭环
+
+- 历史归档会保留每注解释信息，供后续回测分析
+- `analyze_archive.py` 负责离线学习，当前可输出贡献排行、双视角差异、矩阵行表现以及三类补丁
+- 当前闭环已经升级为“权重 + 矩阵 + 参数”联合学习
+
+#### 4. 补丁回灌规则
+
+- `predict.py` 在 `team` 模式下会自动尝试回灌最新补丁
 - `weight patch`
   - 支持显式指定：`--weight-patch config/weight_patch.latest.json`
   - 未显式指定时，自动尝试 `config/weight_patch.latest.json`
@@ -245,8 +241,7 @@ python predict.py --advanced --num 5
 - `matrix patch`
   - 当前不提供单独 CLI 参数
   - 默认自动尝试 `config/matrix_patch.latest.json`
-
-如果相关文件不存在，系统会自动回退到内置默认配置。
+- 如果相关文件不存在，系统会自动回退到内置默认配置
 
 ```bash
 python predict.py --mode team --num 5 --learn-cycles 24
@@ -282,32 +277,74 @@ python predict.py --mode team --num 5 --learn-cycles 24
 
 预测归档目录，存储每期预测结果用于回测分析。
 
+### config/*.latest.json
+
+`config/` 目录用于保存当前默认回灌的最新补丁文件：
+
+- `weight_patch.latest.json`
+  - 记录专家基础权重与建议权重增减量
+  - `predict.py` 可通过 `--weight-patch` 显式指定，或默认自动发现
+- `matrix_patch.latest.json`
+  - 记录矩阵行表现、行权重与偏好行顺序
+  - `predict.py` 在 `team` 模式下默认自动发现并回灌
+- `param_patch.latest.json`
+  - 记录核心池大小、出票衰减参数与矩阵偏好参数
+  - `predict.py` 在 `team` 模式下默认自动发现并回灌
+
+如果这些文件不存在，系统会自动回退到内置默认配置，不会阻断预测。
+
+### prediction_archive/analysis_report.*
+
+当执行 `analyze_archive.py --export-prefix prediction_archive/analysis_report` 时，会生成一组分析产物：
+
+- `analysis_report.json`
+  - 结构化保存贡献排行、双视角差异、矩阵排行与建议项
+- `analysis_report.csv`
+  - 便于快速查看和外部处理的表格结果
+- `analysis_report.weight_patch.json`
+  - 本轮分析导出的权重补丁
+- `analysis_report.matrix_patch.json`
+  - 本轮分析导出的矩阵补丁
+- `analysis_report.param_patch.json`
+  - 本轮分析导出的参数补丁
+
+这些文件是“本轮分析结果”，而 `config/*.latest.json` 是“当前默认回灌入口”。
+
 ## 按场景速查表
 
 | 场景 | 目标 | 推荐命令 |
 |------|------|----------|
-| 预测 | 日常团队预测（默认） | `python update_data.py`<br>`python predict.py --mode team --num 5` |
+| 预测 | 团队模式日常预测（默认主链） | `python update_data.py`<br>`python predict.py --mode team --num 5` |
 | 预测 | 单策略快速对比 | `python predict.py --mode single --all --num 3` |
 | 预测 | 指定策略复现实验 | `python predict.py --mode single --strategy hot --num 3 --seed 42` |
 | 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
 | 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
-| 分析 | 导出报告 + 自动写回最新补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
-| 补丁回灌 | 显式加载权重补丁预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
-| 补丁回灌 | 默认自动发现并加载三类补丁 | `python predict.py --mode team --num 5` |
-| 补丁回灌 | 无补丁文件时使用默认配置 | `python predict.py --mode team --num 5`（若 `config/*.latest.json` 不存在则自动回退） |
+| 分析 | 导出报告并写回三类补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
+| 补丁回灌 | 显式加载权重补丁参与团队预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
+| 补丁回灌 | 默认自动回灌三类补丁 | `python predict.py --mode team --num 5` |
+| 补丁回灌 | 补丁缺失时回退内置默认配置 | `python predict.py --mode team --num 5`（若 `config/*.latest.json` 不存在则自动回退） |
 
 ## 文件结构
 
 ```
 lottery-predictor/
+├── AGENT.md                  # 仓库内 Agent 工作说明
+├── CLAUDE.md                 # Claude Code 仓库入口说明
 ├── README.md                 # 本文档
-├── SKILL.md                  # Claude技能文档
+├── SKILL.md                  # Claude 技能文档
+├── agent_registry.py         # 共享专家注册表
+├── analyze_archive.py        # 归档分析与补丁导出
 ├── update_data.py            # 数据更新脚本
 ├── predict.py                # 预测主脚本
 ├── manual_data_import.py     # 手动数据导入
 ├── lottery_data.json         # 数据文件（自动创建）
+├── config/
+│   ├── weight_patch.latest.json  # 最新专家权重补丁
+│   ├── matrix_patch.latest.json  # 最新矩阵补丁
+│   └── param_patch.latest.json   # 最新参数补丁
 └── prediction_archive/       # 预测归档目录
-    └── 2026038.txt
+    ├── 2026038.txt
+    └── analysis_report.*     # 导出的分析报告与补丁
 ```
 
 ## 技术说明
@@ -338,8 +375,8 @@ lottery-predictor/
 
 #### 自学习闭环
 - 输入：历史预测归档、真实开奖结果、专家贡献明细
-- 学习对象：专家权重、窗口参数、融合参数
-- 输出：`weight_patch.latest.json` 与后续可扩展的 `param_patch.latest.json`
+- 学习对象：专家权重、矩阵行偏好、窗口参数、融合参数
+- 输出：`weight_patch.latest.json`、`matrix_patch.latest.json`、`param_patch.latest.json`
 
 ### 最佳实践
 
@@ -351,6 +388,14 @@ lottery-predictor/
 
 ## 更新日志
 
+- **2026-04-21**:
+  - 增加数据新鲜度保护与归档防覆盖，避免用旧数据预测或覆盖同期原始归档
+  - 移除 `LSTM/TensorFlow` 主链依赖，团队模式稳定收敛到 8 个规则型专家
+  - 团队模式升级为“核心号码池 + 旋转矩阵出票”，固定输出 5 注 `6+1`
+  - 自学习闭环扩展到三类补丁：`weight patch`、`matrix patch`、`param patch`
+  - `predict.py` 新增补丁自动回灌，形成“分析 -> 写回 -> 再预测”的闭环
+  - 新增 `AGENT.md`，并同步更新 `CLAUDE.md` 与 README 文档入口
+  - 修复 `update_data.py` 的数据范围显示顺序，统一为“旧日期 -> 新日期”
 - **2026-04-06**: 
   - 新增3个高级Agent：周期性(cycle)、和值趋势(sum)、区间平衡(zone)
   - 新增高级综合分析模块（时间加权、关联分析、模式识别、遗传算法）
