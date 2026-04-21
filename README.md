@@ -32,17 +32,17 @@
 
 **新增功能**：
 - 🔬 **高级分析模块**：时间加权、关联分析、模式识别、遗传算法
-- 🧠 **LSTM神经网络**：深度学习预测模型
-- 🤖 **9-Agent团队模式**：多策略协同预测
+- ♻️ **自学习闭环方向**：基于归档回测持续调权调参
+- 🤖 **8-Agent团队模式**：先聚合核心号码池，再用旋转矩阵固定出票 5 注
 
 ## 功能特点
 
 - ✅ **真实数据**：从500彩票网自动抓取最新开奖数据
 - ✅ **增量更新**：智能合并新旧数据，保留完整历史
-- ✅ **多策略预测**：支持9种预测策略（含3种新增高级策略）
-- ✅ **团队协同**：9个AI Agent协同决策，动态权重融合
+- ✅ **多策略预测**：支持8种预测策略（含3种新增高级策略）
+- ✅ **团队协同**：8个AI Agent协同决策，聚合 10 球核心池后固定输出 5 注
 - ✅ **高级分析**：时间加权、关联分析、模式识别、遗传算法
-- ✅ **深度学习**：可选LSTM神经网络预测（需安装TensorFlow）
+- ✅ **自学习闭环**：归档分析、权重补丁、参数补丁设计
 - ✅ **简单易用**：命令行操作，无需复杂配置
 
 ## 快速开始
@@ -53,9 +53,6 @@
 # 基础依赖
 pip install playwright
 playwright install chromium
-
-# 可选：LSTM神经网络支持
-pip install tensorflow numpy
 ```
 
 ### 基本使用流程
@@ -91,7 +88,7 @@ python update_data.py
 基于历史数据进行号码预测。
 
 ```bash
-# 默认使用团队模式，生成5注
+# 默认使用团队模式，固定生成5注
 python predict.py
 
 # 使用追热策略，生成3注
@@ -103,17 +100,14 @@ python predict.py --mode single --all
 # 使用高级综合分析
 python predict.py --advanced
 
-# 使用LSTM神经网络（需安装TensorFlow）
-python predict.py --mode single --strategy lstm --num 3
-
 # 查看帮助
 python predict.py --help
 ```
 
 **参数说明**：
 - `--mode, -m`: 预测模式 (`single`=单策略, `team`=团队模式，默认team)
-- `--strategy, -s`: 预测策略 (`hot`/`cold`/`missing`/`balanced`/`random`/`cycle`/`sum`/`zone`/`lstm`)
-- `--num, -n`: 生成注数（默认5注）
+- `--strategy, -s`: 预测策略 (`hot`/`cold`/`missing`/`balanced`/`random`/`cycle`/`sum`/`zone`)
+- `--num, -n`: 生成注数（`team` 模式固定输出 5 注，`single` 模式按传入值）
 - `--all, -a`: 使用所有策略
 - `--advanced, -adv`: 使用高级综合分析
 - `--learn-cycles`: 团队模式回看期数（默认24期）
@@ -176,11 +170,18 @@ python analyze_archive.py \
 | `sum` | 和值趋势策略 | 基于历史平均和值±标准差预测 |
 | `zone` | 区间平衡策略 | 分析1-11/12-22/23-33三区分布均衡 |
 
-### 深度学习策略（1种，新增）
+### 自学习闭环方向
 
-| 策略 | 名称 | 说明 |
-|------|------|------|
-| `lstm` | LSTM神经网络 | 使用深度学习模型学习时间序列模式 |
+- 历史归档会保留每注解释信息，供后续回测分析
+- `analyze_archive.py` 可输出贡献排行、双视角差异与权重补丁
+- 后续建议扩展参数补丁，将“权重学习”升级为“权重 + 参数”联合学习
+
+### 旋转矩阵出票
+
+- `team` 模式不再把专家提案直接随机打散成多注
+- 系统会先汇总出 `10` 个核心红球与少量蓝球候选池
+- 随后使用固定 `5` 行旋转矩阵，把核心池压缩为 `5` 注 `6+1`
+- 这样可以尽量保留号码池价值，避免在拆票阶段把高价值号码关系随机稀释
 
 ## 高级分析模块
 
@@ -199,7 +200,7 @@ python predict.py --advanced --num 5
 
 ### 团队模式（--mode team）
 
-9个AI Agent协同工作：
+8个AI Agent协同工作：
 
 1. 每个Agent基于不同策略生成候选注
 2. 主Agent通过24期历史回测学习各Agent权重
@@ -262,7 +263,6 @@ lottery-predictor/
 ├── SKILL.md                  # Claude技能文档
 ├── update_data.py            # 数据更新脚本
 ├── predict.py                # 预测主脚本
-├── lstm_predictor.py         # LSTM神经网络模块（新增）
 ├── manual_data_import.py     # 手动数据导入
 ├── lottery_data.json         # 数据文件（自动创建）
 └── prediction_archive/       # 预测归档目录
@@ -295,10 +295,10 @@ lottery-predictor/
 - 向理想分布2-2-2靠拢
 - 优先选择偏少区域的热号
 
-#### LSTM神经网络
-- 输入：过去10期开奖（49维one-hot向量）
-- 网络：2层LSTM + Dropout
-- 输出：红球概率分布（33维）+ 蓝球概率（16维）
+#### 自学习闭环
+- 输入：历史预测归档、真实开奖结果、专家贡献明细
+- 学习对象：专家权重、窗口参数、融合参数
+- 输出：`weight_patch.latest.json` 与后续可扩展的 `param_patch.latest.json`
 
 ### 最佳实践
 
@@ -312,9 +312,8 @@ lottery-predictor/
 
 - **2026-04-06**: 
   - 新增3个高级Agent：周期性(cycle)、和值趋势(sum)、区间平衡(zone)
-  - 新增LSTM神经网络预测模块
   - 新增高级综合分析模块（时间加权、关联分析、模式识别、遗传算法）
-  - 团队模式扩展至9个Agent
+  - 团队模式扩展至8个Agent
   - 优化蓝球预测逻辑
 - **2026-03-25**: 初始版本发布，支持数据自动更新和多策略预测
 

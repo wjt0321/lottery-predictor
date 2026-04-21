@@ -69,6 +69,24 @@ class AnalyzeArchiveTests(unittest.TestCase):
         self.assertTrue(any("建议提高" in line for line in suggestions))
         self.assertTrue(any("多样性替换" in line for line in suggestions))
 
+    def test_build_agent_ranking_filters_retired_agents(self):
+        records = [
+            {
+                "period": "2026036",
+                "ticket_index": 1,
+                "payload": {
+                    "sources": ["hot", "lstm"],
+                    "red": [{"ball": 1, "agent_contributions": {"hot": 0.6, "lstm": 0.9}}],
+                    "blue": {"ball": 7, "agent_contributions": {"hot": 0.4, "lstm": 0.3}},
+                    "diversity_replacements": [],
+                },
+            }
+        ]
+        ranking = analyze_archive.build_agent_ranking(records)
+        agents = [row["agent"] for row in ranking]
+        self.assertIn("hot", agents)
+        self.assertNotIn("lstm", agents)
+
     def test_export_reports_and_dual_view_delta(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self._write_archive(
@@ -131,6 +149,13 @@ class AnalyzeArchiveTests(unittest.TestCase):
             with open(final_latest, "r", encoding="utf-8") as f:
                 latest_payload = json.load(f)
             self.assertIn("recommended_base_weights", latest_payload)
+
+    def test_build_weight_patch_payload_filters_retired_agents(self):
+        ranking = [{"agent": "hot", "score": 1.0}, {"agent": "lstm", "score": 2.0}]
+        weight_adjustments = [{"agent": "hot", "delta": 0.1, "weight_delta": 0.02}, {"agent": "lstm", "delta": 0.2, "weight_delta": 0.01}]
+        payload = analyze_archive.build_weight_patch_payload(ranking, weight_adjustments)
+        self.assertIn("hot", payload["agents"])
+        self.assertNotIn("lstm", payload["agents"])
 
 
 if __name__ == "__main__":

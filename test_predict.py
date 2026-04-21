@@ -2,6 +2,9 @@ import tempfile
 import unittest
 import json
 import os
+import subprocess
+import sys
+from datetime import datetime
 
 import predict
 
@@ -30,6 +33,40 @@ class PredictFlowTests(unittest.TestCase):
         self.assertTrue(result["matched"])
         self.assertEqual(result["red_hits"], 1)
         self.assertEqual(result["blue_hit"], 1)
+
+    def test_agent_teams_excludes_lstm(self):
+        self.assertNotIn("lstm", predict.AGENT_TEAMS)
+
+    def test_predict_help_has_no_tensorflow_warning(self):
+        project_root = os.path.abspath(os.path.dirname(__file__) or ".")
+        result = subprocess.run(
+            [sys.executable, "predict.py", "--help"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        self.assertNotIn("TensorFlow未安装", output)
+        self.assertNotIn("lstm", output.lower())
+
+    def test_is_data_stale_flags_missing_draw(self):
+        stale, detail = predict.is_data_stale("2026-04-16", now=datetime(2026, 4, 21, 12, 0, 0))
+        self.assertTrue(stale)
+        self.assertEqual(detail["latest_record_date"], "2026-04-16")
+        self.assertEqual(detail["expected_latest_draw_date"], "2026-04-19")
+
+    def test_is_data_stale_allows_pre_draw_window(self):
+        stale, detail = predict.is_data_stale("2026-04-19", now=datetime(2026, 4, 21, 12, 0, 0))
+        self.assertFalse(stale)
+        self.assertEqual(detail["expected_latest_draw_date"], "2026-04-19")
+
+    def test_is_data_stale_handles_invalid_date(self):
+        stale, detail = predict.is_data_stale("bad-date", now=datetime(2026, 4, 21, 12, 0, 0))
+        self.assertTrue(stale)
+        self.assertIn("error", detail)
 
     def test_save_and_load_compact_archive(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -106,6 +143,56 @@ class PredictFlowTests(unittest.TestCase):
             finally:
                 predict.ARCHIVE_DIR = old_dir
 
+    def test_save_compact_prediction_keeps_existing_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_dir = predict.ARCHIVE_DIR
+            predict.ARCHIVE_DIR = temp_dir
+            try:
+                path1 = predict.save_compact_prediction(
+                    target_period="2026997",
+                    tickets=[{"red": [1, 2, 3, 4, 5, 6], "blue": 7, "sources": ["hot"]}],
+                    lead_summary="factor=1.00",
+                )
+                with open(path1, "r", encoding="utf-8") as f:
+                    original_content = f.read()
+
+                path2 = predict.save_compact_prediction(
+                    target_period="2026997",
+                    tickets=[{"red": [7, 8, 9, 10, 11, 12], "blue": 13, "sources": ["cold"]}],
+                    lead_summary="factor=0.95",
+                )
+
+                self.assertNotEqual(os.path.normpath(path1), os.path.normpath(path2))
+                with open(path1, "r", encoding="utf-8") as f:
+                    self.assertEqual(f.read(), original_content)
+                with open(path2, "r", encoding="utf-8") as f:
+                    updated_content = f.read()
+                self.assertIn("ticket1=07 08 09 10 11 12+13|cold", updated_content)
+            finally:
+                predict.ARCHIVE_DIR = old_dir
+
+    def test_load_latest_archive_prefers_latest_timestamped_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_dir = predict.ARCHIVE_DIR
+            predict.ARCHIVE_DIR = temp_dir
+            try:
+                predict.save_compact_prediction(
+                    target_period="2026996",
+                    tickets=[{"red": [1, 2, 3, 4, 5, 6], "blue": 7, "sources": ["hot"]}],
+                    lead_summary="factor=1.00",
+                )
+                predict.save_compact_prediction(
+                    target_period="2026996",
+                    tickets=[{"red": [7, 8, 9, 10, 11, 12], "blue": 13, "sources": ["cold"]}],
+                    lead_summary="factor=0.95",
+                )
+                latest = predict.load_latest_archive()
+                self.assertIsNotNone(latest)
+                self.assertEqual(latest["period"], "2026996")
+                self.assertEqual(latest["ticket1"], "07 08 09 10 11 12+13|cold")
+            finally:
+                predict.ARCHIVE_DIR = old_dir
+
     def test_build_expert_teams_count(self):
         records = [
             {"period": "2026002", "date": "2026-01-03", "red_balls": [1, 2, 3, 4, 5, 6], "blue_ball": 7},
@@ -115,6 +202,100 @@ class PredictFlowTests(unittest.TestCase):
         self.assertEqual(len(teams), len(predict.AGENT_TEAMS))
         valid = [name for name, payload in teams.items() if len(payload.get("proposals", [])) == 2]
         self.assertGreaterEqual(len(valid), 3)
+
+    def test_resolve_team_ticket_count_is_fixed_to_five(self):
+        self.assertEqual(predict.resolve_team_ticket_count(1), 5)
+        self.assertEqual(predict.resolve_team_ticket_count(5), 5)
+        self.assertEqual(predict.resolve_team_ticket_count(9), 5)
+
+    def test_build_core_pool_snapshot_collects_top10_red_pool(self):
+        teams = {
+            "hot": {
+                "proposals": [
+                    {"red": [1, 2, 3, 4, 5, 6], "blue": 1},
+                    {"red": [1, 2, 3, 7, 8, 9], "blue": 2},
+                ],
+                "error": "",
+            },
+            "cold": {
+                "proposals": [
+                    {"red": [1, 2, 3, 4, 7, 10], "blue": 2},
+                    {"red": [1, 2, 8, 9, 10, 11], "blue": 3},
+                ],
+                "error": "",
+            },
+            "balanced": {
+                "proposals": [
+                    {"red": [1, 3, 4, 5, 6, 10], "blue": 1},
+                    {"red": [2, 4, 6, 8, 10, 12], "blue": 2},
+                ],
+                "error": "",
+            },
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.2, "balanced": 0.3},
+            "diff_scores": {"hot": 0.0, "cold": 0.0, "balanced": 0.0},
+        }
+        snapshot = predict.build_core_pool_snapshot(teams, lead_model, diff_factor=1.0)
+        self.assertEqual(len(snapshot["red_pool"]), 10)
+        self.assertEqual(snapshot["red_pool"][:4], [1, 2, 3, 4])
+        self.assertEqual(snapshot["blue_pool"][:2], [2, 1])
+        self.assertIn("hot", snapshot["pool_sources"][1])
+
+    def test_generate_rotation_matrix_tickets_uses_pool_of_ten(self):
+        snapshot = {
+            "red_pool": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "blue_pool": [3, 5],
+            "red_scores": {n: 1.0 for n in range(1, 11)},
+            "blue_scores": {3: 1.0, 5: 0.8},
+            "pool_sources": {n: ["hot", "balanced"] for n in range(1, 11)},
+            "valid_agents": ["hot", "balanced"],
+        }
+        tickets = predict.generate_rotation_matrix_tickets(snapshot)
+        self.assertEqual(len(tickets), 5)
+        covered = set()
+        for index, ticket in enumerate(tickets, start=1):
+            self.assertEqual(len(ticket["red"]), 6)
+            self.assertTrue(set(ticket["red"]).issubset(set(snapshot["red_pool"])))
+            self.assertIn(ticket["blue"], snapshot["blue_pool"])
+            self.assertEqual(ticket["matrix_row_id"], index)
+            covered.update(ticket["red"])
+        self.assertEqual(covered, set(snapshot["red_pool"]))
+
+    def test_generate_team_matrix_tickets_builds_archive_ready_payload(self):
+        teams = {
+            "hot": {
+                "proposals": [
+                    {"red": [1, 2, 3, 4, 5, 6], "blue": 1},
+                    {"red": [1, 2, 3, 7, 8, 9], "blue": 2},
+                ],
+                "error": "",
+            },
+            "cold": {
+                "proposals": [
+                    {"red": [1, 2, 3, 4, 7, 10], "blue": 2},
+                    {"red": [1, 2, 8, 9, 10, 11], "blue": 3},
+                ],
+                "error": "",
+            },
+            "balanced": {
+                "proposals": [
+                    {"red": [1, 3, 4, 5, 6, 10], "blue": 1},
+                    {"red": [2, 4, 6, 8, 10, 12], "blue": 2},
+                ],
+                "error": "",
+            },
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.2, "balanced": 0.3},
+            "diff_scores": {"hot": 0.0, "cold": 0.0, "balanced": 0.0},
+        }
+        tickets = predict.generate_team_matrix_tickets(teams, lead_model, diff_factor=1.0)
+        self.assertEqual(len(tickets), 5)
+        for ticket in tickets:
+            self.assertIn("explain_json", ticket)
+            self.assertEqual(ticket["explain_json"]["matrix"]["type"], "10_red_guard_6_to_5")
+            self.assertEqual(len(ticket["explain_json"]["core_pool"]["red_pool"]), 10)
 
     def test_build_lead_agent_report(self):
         lead_model = {
@@ -226,7 +407,7 @@ class PredictFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             patch_path = f"{temp_dir}/weight_patch.json"
             payload = {
-                "recommended_base_weights": {"hot": 0.2, "cold": 0.1, "missing": 0.1, "balanced": 0.2, "random": 0.1, "cycle": 0.1, "sum": 0.1, "zone": 0.05, "lstm": 0.05},
+                "recommended_base_weights": {"hot": 0.2, "cold": 0.1, "missing": 0.1, "balanced": 0.2, "random": 0.1, "cycle": 0.1, "sum": 0.1, "zone": 0.1, "lstm": 0.05},
                 "weight_deltas": {"hot": 0.01},
             }
             with open(patch_path, "w", encoding="utf-8") as f:
@@ -234,6 +415,7 @@ class PredictFlowTests(unittest.TestCase):
             loaded = predict.load_weight_patch(patch_path)
             self.assertAlmostEqual(sum(loaded.values()), 1.0, places=6)
             self.assertGreater(loaded["hot"], loaded["zone"])
+            self.assertNotIn("lstm", loaded)
 
     def test_train_lead_agent_accepts_initial_weights(self):
         records = self._build_mock_records(72)

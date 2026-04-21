@@ -8,6 +8,12 @@ import os
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional
 
+from agent_registry import VALID_AGENTS
+
+
+def _is_valid_agent(agent: object) -> bool:
+    return str(agent) in VALID_AGENTS
+
 
 def _iter_archive_files(archive_dir: str) -> List[str]:
     if not os.path.isdir(archive_dir):
@@ -72,13 +78,16 @@ def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, obje
             continue
         total_tickets += 1
         for agent in payload.get("sources", []) or []:
-            source_count[str(agent)] += 1
+            if _is_valid_agent(agent):
+                source_count[str(agent)] += 1
         for red in payload.get("red", []) or []:
             if not isinstance(red, dict):
                 continue
             contribs = red.get("agent_contributions", {}) or {}
             if isinstance(contribs, dict):
                 for agent, val in contribs.items():
+                    if not _is_valid_agent(agent):
+                        continue
                     try:
                         score_by_agent[str(agent)] += float(val)
                     except Exception:
@@ -88,6 +97,8 @@ def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, obje
             contribs = blue.get("agent_contributions", {}) or {}
             if isinstance(contribs, dict):
                 for agent, val in contribs.items():
+                    if not _is_valid_agent(agent):
+                        continue
                     try:
                         score_by_agent[str(agent)] += float(val)
                     except Exception:
@@ -209,8 +220,8 @@ def build_weight_patch_payload(
     weight_adjustments: List[Dict[str, object]],
 ) -> Dict[str, object]:
     agents = sorted(
-        set(str(r.get("agent")) for r in all_time_ranking if r.get("agent"))
-        | set(str(r.get("agent")) for r in weight_adjustments if r.get("agent"))
+        set(str(r.get("agent")) for r in all_time_ranking if r.get("agent") and _is_valid_agent(r.get("agent")))
+        | set(str(r.get("agent")) for r in weight_adjustments if r.get("agent") and _is_valid_agent(r.get("agent")))
     )
     if not agents:
         return {"recommended_base_weights": {}, "weight_deltas": {}}
