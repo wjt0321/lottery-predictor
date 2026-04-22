@@ -1,38 +1,12 @@
 {
   "metadata": {
-    "total_records": 308,
-    "date_range": "2024-04-04 至 2026-04-16",
-    "last_updated": "2026-04-19 13:09:57",
+    "total_records": 306,
+    "date_range": "2024-04-04 至 2026-04-12",
+    "last_updated": "2026-04-14 16:10:14",
     "source": "500.com-real",
     "is_real": true
   },
   "records": [
-    {
-      "period": "2026042",
-      "date": "2026-04-16",
-      "red_balls": [
-        2,
-        7,
-        12,
-        19,
-        24,
-        31
-      ],
-      "blue_ball": 10
-    },
-    {
-      "period": "2026041",
-      "date": "2026-04-14",
-      "red_balls": [
-        2,
-        8,
-        10,
-        17,
-        19,
-        24
-      ],
-      "blue_ball": 13
-    },
     {
       "period": "2026040",
       "date": "2026-04-12",
