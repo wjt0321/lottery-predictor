@@ -8,22 +8,44 @@ import os
 import random
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 import math
 
-# 尝试导入LSTM预测器
-try:
-    from lstm_predictor import generate_lstm_prediction, LSTMPredictor, TF_AVAILABLE
-except ImportError:
-    TF_AVAILABLE = False
-    LSTMPredictor = None
-    generate_lstm_prediction = None
+from agent_registry import AGENT_TEAMS
 
 
 DATA_FILE = "lottery_data.json"
 ARCHIVE_DIR = "prediction_archive"
-AGENT_TEAMS = ("hot", "cold", "missing", "balanced", "random", "cycle", "sum", "zone", "lstm")
+DRAW_WEEKDAYS = {1, 3, 6}  # 周二、周四、周日
+DRAW_CUTOFF_HOUR = 21
+DRAW_CUTOFF_MINUTE = 30
+TEAM_TICKET_COUNT = 5
+CORE_RED_POOL_SIZE = 10
+CORE_BLUE_POOL_SIZE = 3
+ROTATION_MATRIX_TYPE = "10_red_guard_6_to_5"
+ROTATION_MATRIX_ROWS = (
+    (0, 1, 2, 3, 4, 5),
+    (0, 1, 2, 6, 7, 8),
+    (0, 3, 4, 6, 7, 9),
+    (1, 3, 5, 6, 8, 9),
+    (2, 4, 5, 7, 8, 9),
+)
+DEFAULT_RUNTIME_CONFIG = {
+    "pool_params": {
+        "core_red_pool_size": CORE_RED_POOL_SIZE,
+        "core_blue_pool_size": CORE_BLUE_POOL_SIZE,
+    },
+    "fusion_params": {
+        "ticket_decay_step": 0.08,
+        "min_ticket_decay": 0.65,
+    },
+    "matrix_params": {
+        "matrix_type": ROTATION_MATRIX_TYPE,
+        "preferred_rows": [1, 2, 3, 4, 5],
+        "row_weights": {str(index + 1): 1.0 / len(ROTATION_MATRIX_ROWS) for index in range(len(ROTATION_MATRIX_ROWS))},
+    },
+}
 
 
 def load_data():
@@ -342,7 +364,7 @@ def _safe_red_sample(
 
 
 def generate_prediction(records, strategy='balanced', rng: random.Random = None):
-    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重，支持8种策略"""
+    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重。"""
     rng = rng or random.Random()
     if not records:
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
@@ -406,17 +428,6 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None)
             candidates.extend(zone_hot[:need + 1])
         candidates = list(set(candidates))
         blue_candidates = list(range(1, 17))
-    elif strategy == 'lstm':
-        # LSTM神经网络策略
-        if TF_AVAILABLE and generate_lstm_prediction:
-            try:
-                return generate_lstm_prediction(records, sequence_length=10)
-            except Exception as e:
-                print(f"⚠️ LSTM预测失败: {e}，使用随机策略")
-                return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
-        else:
-            # TensorFlow未安装，使用随机策略
-            return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
 
@@ -498,6 +509,76 @@ def resolve_weight_patch_path(explicit_path: Optional[str], project_root: Option
     if default_path:
         return default_path, "default"
     return None, "none"
+
+
+def _deep_merge_dict(base: Dict[str, object], override: Dict[str, object]) -> Dict[str, object]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_param_patch(patch_path: Optional[str]) -> Dict[str, object]:
+    base_config = json.loads(json.dumps(DEFAULT_RUNTIME_CONFIG))
+    if not patch_path or not os.path.isfile(patch_path):
+        return base_config
+    try:
+        with open(patch_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return base_config
+    if not isinstance(payload, dict):
+        return base_config
+    merged = _deep_merge_dict(base_config, payload)
+    preferred_rows = merged.get("matrix_params", {}).get("preferred_rows", []) or []
+    merged["matrix_params"]["preferred_rows"] = [int(row) for row in preferred_rows if str(row).isdigit()]
+    return merged
+
+
+def load_matrix_patch(patch_path: Optional[str]) -> Dict[str, object]:
+    if not patch_path or not os.path.isfile(patch_path):
+        return {}
+    try:
+        with open(patch_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    matrix_type = str(payload.get("matrix_type", "")).strip()
+    row_weights = payload.get("row_weights", {}) or {}
+    preferred_rows = payload.get("preferred_rows", []) or []
+    cleaned_weights = {str(key): float(value) for key, value in row_weights.items() if str(key).isdigit()}
+    cleaned_rows = [int(row) for row in preferred_rows if str(row).isdigit()]
+    result = {"matrix_params": {}}
+    if matrix_type:
+        result["matrix_params"]["matrix_type"] = matrix_type
+    if cleaned_weights:
+        result["matrix_params"]["row_weights"] = cleaned_weights
+    if cleaned_rows:
+        result["matrix_params"]["preferred_rows"] = cleaned_rows
+    return result
+
+
+def find_default_param_patch(project_root: Optional[str] = None) -> Optional[str]:
+    root = project_root or os.getcwd()
+    candidate = os.path.join(root, "config", "param_patch.latest.json")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def find_default_matrix_patch(project_root: Optional[str] = None) -> Optional[str]:
+    root = project_root or os.getcwd()
+    candidate = os.path.join(root, "config", "matrix_patch.latest.json")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def resolve_runtime_config(project_root: Optional[str] = None) -> Dict[str, object]:
+    runtime = load_param_patch(find_default_param_patch(project_root=project_root))
+    matrix_overlay = load_matrix_patch(find_default_matrix_patch(project_root=project_root))
+    return _deep_merge_dict(runtime, matrix_overlay)
 
 
 def build_archive_lead_summary(diff_factor: float, lead_report: Dict[str, object], patch_source: str) -> str:
@@ -780,7 +861,17 @@ def ensure_archive_dir() -> None:
 
 
 def _archive_file_path(target_period: str) -> str:
-    return os.path.join(ARCHIVE_DIR, f"{target_period}.txt")
+    base_path = os.path.join(ARCHIVE_DIR, f"{target_period}.txt")
+    if not os.path.exists(base_path):
+        return base_path
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = os.path.join(ARCHIVE_DIR, f"{target_period}__{timestamp}.txt")
+    index = 1
+    while os.path.exists(candidate):
+        candidate = os.path.join(ARCHIVE_DIR, f"{target_period}__{timestamp}_{index}.txt")
+        index += 1
+    return candidate
 
 
 def save_compact_prediction(
@@ -927,6 +1018,180 @@ def _ball_sources(teams: Dict[str, Dict[str, object]], ticket_index: int) -> Tup
         blue = proposal["blue"]
         blue_sources.setdefault(blue, []).append(agent)
     return red_sources, blue_sources
+
+
+def resolve_team_ticket_count(_requested: int) -> int:
+    return TEAM_TICKET_COUNT
+
+
+def build_core_pool_snapshot(
+    teams: Dict[str, Dict[str, object]],
+    lead_model: Dict[str, Dict[str, float]],
+    diff_factor: float,
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
+    core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
+    ticket_decay_step = float(runtime.get("fusion_params", {}).get("ticket_decay_step", 0.08))
+    min_ticket_decay = float(runtime.get("fusion_params", {}).get("min_ticket_decay", 0.65))
+    red_scores = {i: 0.0 for i in range(1, 34)}
+    blue_scores = {i: 0.0 for i in range(1, 17)}
+    red_agent_contrib: Dict[int, Dict[str, float]] = {i: {} for i in range(1, 34)}
+    blue_agent_contrib: Dict[int, Dict[str, float]] = {i: {} for i in range(1, 17)}
+    pool_sources: Dict[int, Set[str]] = defaultdict(set)
+    blue_sources: Dict[int, Set[str]] = defaultdict(set)
+    valid_agents: List[str] = []
+
+    for agent, payload in teams.items():
+        proposals = payload.get("proposals", [])
+        if not proposals:
+            continue
+        valid_agents.append(agent)
+        base_weight = lead_model["weights"].get(agent, 0.0) * diff_factor
+        diff_bonus = max(0.0, lead_model["diff_scores"].get(agent, 0.0)) * 0.2
+        final_weight = base_weight * (1 + diff_bonus)
+        for proposal_index, proposal in enumerate(proposals):
+            ticket_decay = max(min_ticket_decay, 1.0 - proposal_index * ticket_decay_step)
+            weighted_score = final_weight * ticket_decay
+            for red in proposal["red"]:
+                red_scores[red] += weighted_score
+                pool_sources[red].add(agent)
+                red_agent_contrib[red][agent] = red_agent_contrib[red].get(agent, 0.0) + weighted_score
+            blue = proposal["blue"]
+            blue_scores[blue] += weighted_score
+            blue_sources[blue].add(agent)
+            blue_agent_contrib[blue][agent] = blue_agent_contrib[blue].get(agent, 0.0) + weighted_score
+
+    ranked_red = sorted(red_scores.items(), key=lambda item: (-item[1], item[0]))
+    ranked_blue = sorted(blue_scores.items(), key=lambda item: (-item[1], item[0]))
+    red_pool = [ball for ball, score in ranked_red if score > 0][:core_red_pool_size]
+    blue_pool = [ball for ball, score in ranked_blue if score > 0][:core_blue_pool_size]
+
+    if len(red_pool) < core_red_pool_size:
+        for ball, _ in ranked_red:
+            if ball not in red_pool:
+                red_pool.append(ball)
+            if len(red_pool) >= core_red_pool_size:
+                break
+    if not blue_pool:
+        blue_pool = [ball for ball, _ in ranked_blue[:1]] or [1]
+
+    return {
+        "red_pool": red_pool,
+        "blue_pool": blue_pool,
+        "red_scores": {ball: round(float(red_scores[ball]), 6) for ball in red_pool},
+        "blue_scores": {ball: round(float(blue_scores[ball]), 6) for ball in blue_pool},
+        "pool_sources": {ball: sorted(pool_sources.get(ball, set())) for ball in red_pool},
+        "blue_sources": {ball: sorted(blue_sources.get(ball, set())) for ball in blue_pool},
+        "red_agent_contrib": red_agent_contrib,
+        "blue_agent_contrib": blue_agent_contrib,
+        "valid_agents": sorted(valid_agents),
+    }
+
+
+def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config: Optional[Dict[str, object]] = None) -> List[Dict[str, object]]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
+    matrix_type = str(runtime.get("matrix_params", {}).get("matrix_type", ROTATION_MATRIX_TYPE))
+    preferred_rows = runtime.get("matrix_params", {}).get("preferred_rows", []) or []
+    if not preferred_rows:
+        preferred_rows = [1, 2, 3, 4, 5]
+    row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= len(ROTATION_MATRIX_ROWS)]
+
+    red_pool = list(snapshot.get("red_pool", []))[:core_red_pool_size]
+    blue_pool = list(snapshot.get("blue_pool", [])) or [1]
+    pool_sources = snapshot.get("pool_sources", {}) or {}
+    blue_sources = snapshot.get("blue_sources", {}) or {}
+    red_agent_contrib = snapshot.get("red_agent_contrib", {}) or {}
+    blue_agent_contrib = snapshot.get("blue_agent_contrib", {}) or {}
+    valid_agents = list(snapshot.get("valid_agents", []))
+    if len(red_pool) < core_red_pool_size:
+        return []
+
+    tickets: List[Dict[str, object]] = []
+    for row_id in row_order:
+        row = ROTATION_MATRIX_ROWS[row_id - 1]
+        final_red = sorted(red_pool[index] for index in row)
+        final_blue = int(blue_pool[(row_id - 1) % len(blue_pool)])
+        source_agents = set()
+        red_contrib_json = []
+        red_contrib_parts = []
+        for ball in final_red:
+            source_agents.update(pool_sources.get(ball, []))
+            contribs = red_agent_contrib.get(ball, {}) or {}
+            top_agent, top_score = ("na", 0.0)
+            if contribs:
+                top_agent, top_score = max(contribs.items(), key=lambda x: x[1])
+            red_contrib_parts.append(f"{ball:02d}:{top_agent}({top_score:.3f})")
+            red_contrib_json.append(
+                {
+                    "ball": int(ball),
+                    "top_agent": top_agent,
+                    "top_contribution": round(float(top_score), 6),
+                    "agent_contributions": {
+                        a: round(float(s), 6) for a, s in sorted(contribs.items(), key=lambda x: x[1], reverse=True)
+                    },
+                }
+            )
+        source_agents.update(blue_sources.get(final_blue, []))
+        blue_contribs = blue_agent_contrib.get(final_blue, {}) or {}
+        blue_agent, blue_score = ("na", 0.0)
+        if blue_contribs:
+            blue_agent, blue_score = max(blue_contribs.items(), key=lambda x: x[1])
+        explain = (
+            f"来源Agent={','.join(sorted(source_agents) or valid_agents)};"
+            f"红球贡献={','.join(red_contrib_parts)};"
+            f"蓝球贡献={final_blue:02d}:{blue_agent}({blue_score:.3f});"
+            f"矩阵类型={matrix_type};"
+            f"矩阵行={row_id};"
+            f"覆盖池位={','.join(str(index + 1) for index in row)}"
+        )
+        explain_json = {
+            "sources": sorted(source_agents) or valid_agents,
+            "red": red_contrib_json,
+            "blue": {
+                "ball": int(final_blue),
+                "top_agent": blue_agent,
+                "top_contribution": round(float(blue_score), 6),
+                "agent_contributions": {
+                    a: round(float(s), 6) for a, s in sorted(blue_contribs.items(), key=lambda x: x[1], reverse=True)
+                },
+            },
+            "diversity_replacements": [],
+            "matrix": {
+                "type": matrix_type,
+                "row_id": row_id,
+                "covered_pool_positions": [index + 1 for index in row],
+            },
+            "core_pool": {
+                "red_pool": [int(ball) for ball in red_pool],
+                "blue_pool": [int(ball) for ball in blue_pool],
+            },
+        }
+        tickets.append(
+            {
+                "red": final_red,
+                "blue": final_blue,
+                "sources": sorted(source_agents) or valid_agents,
+                "valid_agents": valid_agents,
+                "explain": explain,
+                "explain_json": explain_json,
+                "diversity_replacements": [],
+                "matrix_row_id": row_id,
+            }
+        )
+    return tickets
+
+
+def generate_team_matrix_tickets(
+    teams: Dict[str, Dict[str, object]],
+    lead_model: Dict[str, Dict[str, float]],
+    diff_factor: float,
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> List[Dict[str, object]]:
+    snapshot = build_core_pool_snapshot(teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config)
+    return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
 
 
 def judge_with_lead_agent(
@@ -1115,6 +1380,37 @@ def next_target_period(records: List[Dict]) -> str:
     return f"{latest}_next"
 
 
+def latest_completed_draw_date(now: Optional[datetime] = None):
+    current = now or datetime.now()
+    cutoff_passed = (
+        current.hour > DRAW_CUTOFF_HOUR
+        or (current.hour == DRAW_CUTOFF_HOUR and current.minute >= DRAW_CUTOFF_MINUTE)
+    )
+    candidate = current.date() if current.weekday() in DRAW_WEEKDAYS and cutoff_passed else current.date() - timedelta(days=1)
+    while candidate.weekday() not in DRAW_WEEKDAYS:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def is_data_stale(latest_record_date: str, now: Optional[datetime] = None):
+    expected_date = latest_completed_draw_date(now=now)
+    try:
+        latest_date = datetime.strptime(str(latest_record_date), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return True, {
+            "latest_record_date": str(latest_record_date),
+            "expected_latest_draw_date": expected_date.isoformat(),
+            "checked_at": (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+            "error": "invalid_latest_record_date",
+        }
+    stale = latest_date < expected_date
+    return stale, {
+        "latest_record_date": latest_date.isoformat(),
+        "expected_latest_draw_date": expected_date.isoformat(),
+        "checked_at": (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def main():
     try:
         if hasattr(sys.stdout, "reconfigure"):
@@ -1126,10 +1422,10 @@ def main():
     parser.add_argument('--mode', '-m', default='team', choices=['single', 'team'],
                        help='预测模式：single=单策略，team=多Agent团队')
     parser.add_argument('--strategy', '-s', default='balanced',
-                       choices=['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone', 'lstm'],
-                       help='预测策略（新增：cycle=周期性, sum=和值趋势, zone=区间平衡, lstm=神经网络）')
+                       choices=['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone'],
+                       help='预测策略（新增：cycle=周期性, sum=和值趋势, zone=区间平衡）')
     parser.add_argument('--num', '-n', type=int, default=5,
-                       help='生成注数')
+                       help='生成注数（team 模式固定输出 5 注）')
     parser.add_argument('--all', '-a', action='store_true',
                        help='使用所有策略')
     parser.add_argument('--learn-cycles', type=int, default=24,
@@ -1159,6 +1455,16 @@ def main():
         print(f"❌ 加载数据失败: {e}")
         print("💡 请先运行: python update_data.py")
         return
+
+    stale, stale_detail = is_data_stale(records[0]['date'])
+    if stale:
+        print("\n⚠️ 本地开奖数据已落后于最近应开奖期，已停止本次预测。")
+        print(f"📌 本地最新开奖日: {stale_detail['latest_record_date']}")
+        print(f"📌 应有最新开奖日: {stale_detail['expected_latest_draw_date']}")
+        if stale_detail.get("error"):
+            print("📌 数据日期字段异常，无法确认是否已更新。")
+        print("💡 请先运行: python update_data.py")
+        return
     
     # 分析数据
     analysis = analyze_hot_cold(records)
@@ -1174,6 +1480,9 @@ def main():
         latest_archive = load_latest_archive()
         gap_result = evaluate_last_prediction_gap(latest_archive, records[0])
         resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
+        param_patch_path = find_default_param_patch()
+        matrix_patch_path = find_default_matrix_patch()
+        runtime_config = resolve_runtime_config()
         initial_weights = load_weight_patch(resolved_patch_path)
         lead_model = train_lead_agent(
             records,
@@ -1189,12 +1498,19 @@ def main():
                 print(f"🧩 已应用权重补丁: {resolved_patch_path}")
             else:
                 print(f"⚠️ 权重补丁不可用，已忽略: {resolved_patch_path}")
+        if param_patch_path:
+            print(f"🧪 已应用参数补丁: {param_patch_path}")
+        if matrix_patch_path:
+            print(f"🧭 已应用矩阵补丁: {matrix_patch_path}")
         print("👑 主Agent学习权重:")
         for agent, weight in sorted(lead_model["weights"].items(), key=lambda x: x[1], reverse=True):
             diff = lead_model["diff_scores"][agent]
             print(f"  - {agent:8s} 权重 {weight:.3f} | 差异均值 {diff:+.3f}")
 
-        expert_teams = build_expert_teams(records, tickets=args.num, seed=args.seed)
+        team_ticket_count = resolve_team_ticket_count(args.num)
+        if args.num != team_ticket_count:
+            print(f"📐 旋转矩阵出票已启用，team 模式固定输出 {team_ticket_count} 注。")
+        expert_teams = build_expert_teams(records, tickets=team_ticket_count, seed=args.seed)
         failed = [name for name, payload in expert_teams.items() if payload.get("error")]
         if failed:
             print(f"\n⚠️ 专家团队降级: {', '.join(failed)}")
@@ -1215,45 +1531,57 @@ def main():
 
         print("\n团队融合结果:")
         target_period = next_target_period(records)
-        final_tickets = []
-        for i in range(args.num):
-            final_ticket = judge_with_lead_agent(
-                expert_teams,
-                lead_model=lead_model,
-                diff_factor=diff_factor,
-                ticket_index=i,
-                seed=args.seed,
-                existing_tickets=final_tickets,
-            )
-            if not final_ticket:
-                red, blue = generate_team_prediction(records, lead_model, rng=rng)
-                sources = []
-                explain = "来源Agent=fallback;红球贡献=na;蓝球贡献=na;多样性替换=无"
-                explain_json = {
-                    "sources": ["fallback"],
-                    "red": [],
-                    "blue": {"ball": int(blue), "top_agent": "fallback", "top_contribution": 0.0, "agent_contributions": {}},
-                    "diversity_replacements": [],
-                }
-            else:
-                red, blue = final_ticket["red"], final_ticket["blue"]
-                sources = final_ticket["sources"]
-                explain = final_ticket.get("explain", "")
-                explain_json = final_ticket.get("explain_json")
+        final_tickets = generate_team_matrix_tickets(
+            expert_teams,
+            lead_model=lead_model,
+            diff_factor=diff_factor,
+            runtime_config=runtime_config,
+        )
+        if not final_tickets:
+            final_tickets = []
+            for i in range(team_ticket_count):
+                final_ticket = judge_with_lead_agent(
+                    expert_teams,
+                    lead_model=lead_model,
+                    diff_factor=diff_factor,
+                    ticket_index=i,
+                    seed=args.seed,
+                    existing_tickets=final_tickets,
+                )
+                if not final_ticket:
+                    red, blue = generate_team_prediction(records, lead_model, rng=rng)
+                    sources = []
+                    explain = "来源Agent=fallback;红球贡献=na;蓝球贡献=na;多样性替换=无"
+                    explain_json = {
+                        "sources": ["fallback"],
+                        "red": [],
+                        "blue": {"ball": int(blue), "top_agent": "fallback", "top_contribution": 0.0, "agent_contributions": {}},
+                        "diversity_replacements": [],
+                    }
+                else:
+                    red, blue = final_ticket["red"], final_ticket["blue"]
+                    sources = final_ticket["sources"]
+                    explain = final_ticket.get("explain", "")
+                    explain_json = final_ticket.get("explain_json")
+                final_tickets.append({
+                    "red": red,
+                    "blue": blue,
+                    "sources": sources or ["fallback"],
+                    "explain": explain,
+                    "explain_json": explain_json,
+                })
+        for i, final_ticket in enumerate(final_tickets):
+            red, blue = final_ticket["red"], final_ticket["blue"]
+            sources = final_ticket["sources"]
+            explain = final_ticket.get("explain", "")
+            explain_json = final_ticket.get("explain_json")
             source_text = ",".join(sources) if sources else "fallback"
             print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d} | 来源 {source_text}")
-            final_tickets.append({
-                "red": red,
-                "blue": blue,
-                "sources": sources or ["fallback"],
-                "explain": explain,
-                "explain_json": explain_json,
-            })
         summary = build_archive_lead_summary(diff_factor, lead_report, patch_source=patch_source)
         saved_path = save_compact_prediction(target_period, final_tickets, summary)
         print(f"\n💾 已归档本期精简预测: {saved_path}")
     else:
-        strategies = ['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone', 'lstm'] if args.all else [args.strategy]
+        strategies = ['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone'] if args.all else [args.strategy]
         strategy_names = {
             'hot': '追热策略',
             'cold': '追冷策略',
@@ -1262,8 +1590,7 @@ def main():
             'random': '完全随机',
             'cycle': '周期性策略',
             'sum': '和值趋势策略',
-            'zone': '区间平衡策略',
-            'lstm': 'LSTM神经网络策略'
+            'zone': '区间平衡策略'
         }
 
         if args.advanced:

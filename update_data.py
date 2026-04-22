@@ -18,6 +18,14 @@ FETCH_TARGET_RECORDS = 220
 MAX_FETCH_PAGES = 8
 
 
+def build_date_range(records):
+    """统一生成从旧到新的日期范围文本。"""
+    if not records:
+        return ""
+    ordered = sorted(records, key=lambda x: x['date'])
+    return f"{ordered[0]['date']} 至 {ordered[-1]['date']}"
+
+
 def load_existing_data():
     """加载现有数据"""
     if os.path.exists(DATA_FILE):
@@ -32,7 +40,7 @@ def save_data(records):
     data = {
         "metadata": {
             "total_records": len(records),
-            "date_range": f"{records[-1]['date']} 至 {records[0]['date']}",
+            "date_range": build_date_range(records),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "source": "500.com-real",
             "is_real": True
@@ -221,7 +229,7 @@ def main():
         # 保存
         save_data(existing_records)
         print(f"\n💾 数据已保存到 {DATA_FILE}")
-        print(f"📅 数据范围: {existing_records[-1]['date']} 至 {existing_records[0]['date']}")
+        print(f"📅 数据范围: {build_date_range(existing_records)}")
     else:
         print("❌ 未能获取新数据")
     
