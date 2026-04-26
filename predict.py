@@ -14,6 +14,15 @@ import math
 
 from agent_registry import AGENT_TEAMS
 
+# 尝试导入增强分析模块
+try:
+    from enhanced_analysis import calculate_enhanced_weights, apply_enhanced_weights
+    ENHANCED_AVAILABLE = True
+except ImportError:
+    ENHANCED_AVAILABLE = False
+    calculate_enhanced_weights = None
+    apply_enhanced_weights = None
+
 
 DATA_FILE = "lottery_data.json"
 ARCHIVE_DIR = "prediction_archive"
@@ -363,8 +372,8 @@ def _safe_red_sample(
     return sorted(rng.sample(unique_candidates, required))
 
 
-def generate_prediction(records, strategy='balanced', rng: random.Random = None):
-    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重。"""
+def generate_prediction(records, strategy='balanced', rng: random.Random = None, use_enhanced=False):
+    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重，支持增强分析。"""
     rng = rng or random.Random()
     if not records:
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
@@ -430,6 +439,35 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None)
         blue_candidates = list(range(1, 17))
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
+    
+    # 应用增强分析权重（如果启用且可用）
+    if use_enhanced and ENHANCED_AVAILABLE and calculate_enhanced_weights:
+        try:
+            enhanced = calculate_enhanced_weights(records)
+            
+            # 应用红球权重
+            red_weights = enhanced['red_weights']
+            weighted_candidates = []
+            for num in candidates:
+                weight = red_weights.get(num, 1.0)
+                weighted_candidates.append((num, weight))
+            
+            # 按权重排序并选择Top12
+            weighted_candidates.sort(key=lambda x: x[1], reverse=True)
+            candidates = [num for num, _ in weighted_candidates[:12]]
+            
+            # 应用蓝球权重
+            blue_weights = enhanced['blue_weights']
+            weighted_blue = []
+            for num in blue_candidates:
+                weight = blue_weights.get(num, 1.0)
+                weighted_blue.append((num, weight))
+            
+            weighted_blue.sort(key=lambda x: x[1], reverse=True)
+            blue_candidates = [num for num, _ in weighted_blue[:5]]
+        except Exception:
+            # 增强分析失败时回退到原始逻辑
+            pass
 
     red_balls = _safe_red_sample(rng, candidates, required=6)
     
@@ -1436,6 +1474,8 @@ def main():
                        help='权重补丁文件路径（来自 analyze_archive 导出的 weight_patch.json）')
     parser.add_argument('--advanced', '-adv', action='store_true',
                        help='使用高级综合分析（时间加权+关联分析+模式识别+遗传算法）')
+    parser.add_argument('--enhanced', '-e', action='store_true',
+                       help='启用增强分析（融合奖池/销售额/可视化模式权重）')
     
     args = parser.parse_args()
     rng = random.Random(args.seed)
@@ -1605,7 +1645,7 @@ def main():
                 print(f"\n{name}:")
 
                 for i in range(args.num):
-                    red, blue = generate_prediction(records, strategy, rng=rng)
+                    red, blue = generate_prediction(records, strategy, rng=rng, use_enhanced=args.enhanced)
                     print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d}")
     
     print("\n" + "=" * 60)
