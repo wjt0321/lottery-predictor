@@ -72,12 +72,41 @@ def fetch_from_500():
             if not all(x.isdigit() for x in reds) or not blue.isdigit() or not date_text:
                 continue
             full_period = f"20{period}"
+            
+            # 解析额外数据（销售额、奖池、中奖注数等）
+            extra_data = {}
+            try:
+                # 销售额通常在第8列
+                if len(cells) > 8:
+                    sales_text = cells[8].replace(',', '').replace('元', '').strip()
+                    if sales_text.isdigit():
+                        extra_data['sales'] = int(sales_text)
+                # 奖池通常在第9列
+                if len(cells) > 9:
+                    pool_text = cells[9].replace(',', '').replace('元', '').strip()
+                    if pool_text.isdigit():
+                        extra_data['pool'] = int(pool_text)
+                # 一等奖注数通常在第10列
+                if len(cells) > 10:
+                    first_prize_text = cells[10].replace(',', '').strip()
+                    if first_prize_text.isdigit():
+                        extra_data['first_prize_count'] = int(first_prize_text)
+                # 一等奖金额通常在第11列
+                if len(cells) > 11:
+                    first_prize_amount = cells[11].replace(',', '').replace('元', '').strip()
+                    if first_prize_amount.isdigit():
+                        extra_data['first_prize_amount'] = int(first_prize_amount)
+            except Exception:
+                pass
+            
             parsed[full_period] = {
                 "period": full_period,
                 "date": date_text,
                 "red_balls": sorted(int(x) for x in reds),
                 "blue_ball": int(blue),
             }
+            # 合并额外数据
+            parsed[full_period].update(extra_data)
         return parsed
 
     try:
@@ -152,12 +181,33 @@ def fetch_from_500():
                             date_text = cells[15].inner_text().strip() if len(cells) > 15 else ''
                             if period and len(red_balls) == 6 and blue_ball > 0 and date_text:
                                 full_period = f"20{period}"
-                                records_by_period[full_period] = {
+                                record_data = {
                                     "period": full_period,
                                     "date": date_text,
                                     "red_balls": sorted(red_balls),
                                     "blue_ball": blue_ball
                                 }
+                                # 尝试抓取额外数据
+                                try:
+                                    if len(cells) > 8:
+                                        sales_text = cells[8].inner_text().strip().replace(',', '').replace('元', '')
+                                        if sales_text.isdigit():
+                                            record_data['sales'] = int(sales_text)
+                                    if len(cells) > 9:
+                                        pool_text = cells[9].inner_text().strip().replace(',', '').replace('元', '')
+                                        if pool_text.isdigit():
+                                            record_data['pool'] = int(pool_text)
+                                    if len(cells) > 10:
+                                        first_prize_text = cells[10].inner_text().strip().replace(',', '')
+                                        if first_prize_text.isdigit():
+                                            record_data['first_prize_count'] = int(first_prize_text)
+                                    if len(cells) > 11:
+                                        first_prize_amount = cells[11].inner_text().strip().replace(',', '').replace('元', '')
+                                        if first_prize_amount.isdigit():
+                                            record_data['first_prize_amount'] = int(first_prize_amount)
+                                except Exception:
+                                    pass
+                                records_by_period[full_period] = record_data
                     except Exception:
                         continue
                 print(f"   第{page_index + 1}页累计解析 {len(records_by_period)} 条记录")
