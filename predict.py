@@ -118,6 +118,108 @@ def analyze_blue_missing(records):
     }
 
 
+def analyze_blue_patterns(records, periods=60):
+    """蓝球专项模式分析：奇偶轮动、区间循环、重复规律、综合得分。"""
+    if len(records) < 5:
+        return {'blue_scores': {n: 1.0 for n in range(1, 17)}}
+    
+    recent = records[:periods]
+    blues = [r['blue_ball'] for r in recent]
+    
+    # --- 1. 奇偶轮动 ---
+    parity_seq = [b % 2 for b in blues]  # 0=偶, 1=奇
+    odd_count = sum(parity_seq)
+    even_count = len(parity_seq) - odd_count
+    # 下一期奇偶概率：基于平均 + 近期偏离
+    recent_parity = parity_seq[:10]
+    recent_odd_ratio = sum(recent_parity) / len(recent_parity)
+    overall_odd_ratio = odd_count / len(parity_seq)
+    # 近期奇数偏少则下期奇数概率上调
+    next_odd_prob = overall_odd_ratio * 0.5 + (0.5 - recent_odd_ratio) * 0.5 + 0.5
+    next_odd_prob = max(0.35, min(0.65, next_odd_prob))
+    next_even_prob = 1.0 - next_odd_prob
+    
+    # --- 2. 区间轮动 (1-5, 6-10, 11-16) ---
+    def blue_zone(b):
+        if b <= 5: return 0
+        if b <= 10: return 1
+        return 2
+    zone_seq = [blue_zone(b) for b in blues]
+    # 区间转移矩阵
+    zone_trans = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+    for i in range(1, len(zone_seq)):
+        zone_trans[zone_seq[i-1]][zone_seq[i]] += 1
+    for z in range(3):
+        row_sum = sum(zone_trans[z]) or 1
+        for t in range(3):
+            zone_trans[z][t] = (zone_trans[z][t] + 0.5) / (row_sum + 1.5)  # 拉普拉斯平滑
+    
+    last_zone = zone_seq[0]
+    next_zone_prob = zone_trans[last_zone]
+    
+    # --- 3. 重复概率 ---
+    repeat_count = sum(1 for i in range(1, len(blues)) if blues[i] == blues[i-1])
+    repeat_rate = repeat_count / max(1, len(blues) - 1)
+    # 蓝球在冷号后更可能轮换
+    last_blue = blues[0]
+    repeat_bonus = 1.5 if repeat_rate > 0.08 else 0.8  # 重复率低时降低重复权重
+    
+    # --- 4. 热度 (缩小窗口到20期) ---
+    blue_freq = Counter(blues[:20])
+    
+    # --- 5. 综合得分 ---
+    blue_scores = {}
+    for n in range(1, 17):
+        score = 1.0
+        
+        # 奇偶匹配
+        parity_match = next_odd_prob if n % 2 == 1 else next_even_prob
+        score *= 0.7 + parity_match * 0.6
+        
+        # 区间匹配
+        zone = blue_zone(n)
+        zone_match = next_zone_prob[zone]
+        score *= 0.6 + zone_match * 0.8
+        
+        # 热度加权
+        freq = blue_freq.get(n, 0)
+        freq_ratio = freq / max(1, max(blue_freq.values()))
+        score *= 0.5 + freq_ratio * 1.0
+        
+        # 重复惩罚/奖励
+        if n == last_blue:
+            score *= repeat_bonus
+        
+        # 遗漏加权（遗漏越久，适度提高）
+        missing = 0
+        for idx, b in enumerate(blues):
+            if b == n:
+                missing = idx
+                break
+        if missing > 20:
+            score *= 1.15  # 极冷号适度回补
+        elif missing < 3:
+            score *= 0.9  # 刚出过号稍降
+        
+        blue_scores[n] = score
+    
+    # 归一化到 [0.6, 1.5]
+    min_s = min(blue_scores.values()) or 1.0
+    max_s = max(blue_scores.values()) or 1.0
+    span = max_s - min_s
+    if span > 0.01:
+        for n in blue_scores:
+            blue_scores[n] = 0.6 + (blue_scores[n] - min_s) / span * 0.9
+    
+    return {
+        'blue_scores': blue_scores,
+        'next_odd_prob': next_odd_prob,
+        'next_zone_prob': next_zone_prob,
+        'last_blue': last_blue,
+        'repeat_rate': repeat_rate,
+    }
+
+
 def analyze_missing(records):
     """遗漏值分析 - 优化：追踪连续遗漏期数"""
     last_seen = {i: -1 for i in range(1, 34)}
@@ -185,6 +287,31 @@ def analyze_trend(records, periods=10):
         'avg_odd': avg_odd,
         'avg_big': avg_big,
         'avg_zones': avg_zones
+    }
+
+
+def analyze_positions(records, recent_periods=60):
+    """位置频率分析：红球按升序排列，6个位置各有统计规律。"""
+    if len(records) < recent_periods:
+        recent_periods = len(records)
+    recent = records[:recent_periods]
+    
+    pos_freq = [Counter() for _ in range(6)]
+    
+    for r in recent:
+        balls = sorted(r['red_balls'])
+        for pos, ball in enumerate(balls):
+            pos_freq[pos][ball] += 1
+    
+    pos_weights = [{} for _ in range(6)]
+    for pos in range(6):
+        max_count = max(pos_freq[pos].values()) or 1
+        for num in range(1, 34):
+            freq = pos_freq[pos].get(num, 0)
+            pos_weights[pos][num] = min(2.0, max(0.3, (freq / max_count) * 1.5)) if freq > 0 else 0.5
+    
+    return {
+        'pos_weights': pos_weights,
     }
 
 
@@ -382,7 +509,8 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
         'hot_cold': analyze_hot_cold(records),
         'missing': analyze_missing(records),
         'blue_missing': analyze_blue_missing(records),
-        'trend': analyze_trend(records)
+        'trend': analyze_trend(records),
+        'blue_pattern': analyze_blue_patterns(records),
     }
     
     hot_red = analysis['hot_cold']['hot_red']
@@ -391,29 +519,55 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
     hot_blue = analysis['hot_cold']['hot_blue']
     cold_blue = analysis['hot_cold']['cold_blue']
     high_missing_blue = analysis['blue_missing']['high_missing_blue']
+    blue_pattern_scores = analysis['blue_pattern']['blue_scores']
+    
+    # 蓝球加权候选池（从模式分析取Top5）
+    weighted_blue_pool = sorted(
+        blue_pattern_scores.items(), key=lambda x: x[1], reverse=True
+    )
+    top_blue_pattern = [n for n, s in weighted_blue_pool[:5]]
     
     if strategy == 'hot':
         candidates = hot_red
-        # 蓝球选择：热号为主，兼顾遗漏
-        blue_candidates = hot_blue + high_missing_blue[:2]
+        blue_candidates = sorted(set(hot_blue[:3] + top_blue_pattern[:3]))
     elif strategy == 'cold':
         candidates = cold_red
-        # 蓝球选择：冷号 + 高遗漏
-        blue_candidates = cold_blue + high_missing_blue[:3]
+        blue_candidates = sorted(set(cold_blue[:3] + high_missing_blue[:3]))
     elif strategy == 'missing':
         candidates = high_missing
-        # 蓝球选择：高遗漏优先
-        blue_candidates = high_missing_blue + cold_blue[:2]
+        blue_candidates = sorted(set(high_missing_blue[:3] + top_blue_pattern[:3]))
     elif strategy == 'balanced':
-        # 平衡策略优化：增加权重分配
         candidates = list(set(hot_red[:4] + cold_red[:4] + high_missing[:4]))
-        # 蓝球平衡选择
-        blue_candidates = list(set(hot_blue[:3] + high_missing_blue[:3]))
+        blue_candidates = sorted(set(hot_blue[:3] + high_missing_blue[:3] + top_blue_pattern[:2]))
     elif strategy == 'cycle':
-        # 周期性策略
         cycle_analysis = analyze_cycle(records)
         candidates = cycle_analysis['top_cycle'][:10]
-        blue_candidates = list(range(1, 17))
+        if not candidates:
+            candidates = hot_red[:5] + high_missing[:5]
+        blue_candidates = top_blue_pattern
+    elif strategy == 'sum':
+        sum_analysis = analyze_sum_trend(records)
+        weighted_candidates = sorted(
+            sum_analysis['sum_weights'].items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        candidates = [n for n, w in weighted_candidates[:12]]
+        if not candidates:
+            candidates = hot_red[:5] + high_missing[:5]
+        blue_candidates = top_blue_pattern
+    elif strategy == 'zone':
+        zone_analysis = analyze_zone_balance(records)
+        candidates = []
+        for zone in [1, 2, 3]:
+            zone_hot = zone_analysis['zone_hot'][zone]
+            need = zone_analysis['target_zones'][zone]
+            candidates.extend(zone_hot[:need + 1])
+        candidates = list(set(candidates))
+        if len(candidates) < 6:
+            candidates.extend(hot_red[:max(0, 6 - len(candidates))])
+            candidates = sorted(set(candidates))
+        blue_candidates = top_blue_pattern
     elif strategy == 'sum':
         # 和值趋势策略
         sum_analysis = analyze_sum_trend(records)
@@ -471,9 +625,21 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
 
     red_balls = _safe_red_sample(rng, candidates, required=6)
     
-    # 蓝球选择优化：如果有候选池，加权随机选择；否则纯随机
+    # 蓝球选择优化：按模式得分加权采样，不再均匀随机
     if blue_candidates:
-        blue_ball = rng.choice(blue_candidates)
+        bc_weights = [blue_pattern_scores.get(b, 0.5) for b in blue_candidates]
+        total_w = sum(bc_weights)
+        if total_w > 0:
+            r = rng.random() * total_w
+            acc = 0.0
+            blue_ball = blue_candidates[-1]
+            for b, w in zip(blue_candidates, bc_weights):
+                acc += w
+                if acc >= r:
+                    blue_ball = b
+                    break
+        else:
+            blue_ball = rng.choice(blue_candidates)
     else:
         blue_ball = rng.randint(1, 16)
     
@@ -673,11 +839,36 @@ def _window_agent_performance(
         avg_scores[agent] /= weight_acc
         diff_scores[agent] /= weight_acc
 
+    # 趋势动量检测：后半段 vs 前半段
+    mid = len(samples) // 2
+    momentum = {agent: 0.0 for agent in AGENT_TEAMS}
+    if mid >= 3:
+        early_scores = {agent: 0.0 for agent in AGENT_TEAMS}
+        late_scores = {agent: 0.0 for agent in AGENT_TEAMS}
+        early_w = late_w = 0.0
+        for idx, (history_timeline, target) in enumerate(samples):
+            history = list(reversed(history_timeline))
+            round_weight = decay_gamma ** (len(samples) - idx - 1)
+            for agent in AGENT_TEAMS:
+                rng = random.Random(_stable_int_seed("trend", cycles, target.get("period", idx), agent))
+                red, blue = generate_prediction(history, strategy=agent, rng=rng)
+                s = _ticket_score(red, blue, target)
+                if idx < mid:
+                    early_scores[agent] += s * round_weight
+                    early_w += round_weight
+                else:
+                    late_scores[agent] += s * round_weight
+                    late_w += round_weight
+        if early_w > 0 and late_w > 0:
+            for agent in AGENT_TEAMS:
+                momentum[agent] = (late_scores[agent] / late_w) - (early_scores[agent] / early_w)
+
     return {
         "cycles": cycles,
         "samples": len(samples),
         "avg_scores": avg_scores,
         "diff_scores": diff_scores,
+        "momentum": momentum,
     }
 
 
@@ -716,6 +907,7 @@ def train_lead_agent(
     weights = dict(prior_weights)
     avg_scores = {agent: 0.0 for agent in AGENT_TEAMS}
     diff_scores = {agent: 0.0 for agent in AGENT_TEAMS}
+    momentum_scores = {agent: 0.0 for agent in AGENT_TEAMS}
     window_reports = []
     active_weight_total = 0.0
 
@@ -737,6 +929,7 @@ def train_lead_agent(
         for agent in AGENT_TEAMS:
             avg_scores[agent] += report["avg_scores"][agent] * report_weight
             diff_scores[agent] += report["diff_scores"][agent] * report_weight
+            momentum_scores[agent] += report.get("momentum", {}).get(agent, 0.0) * report_weight
 
     if active_weight_total <= 0:
         normalized = {agent: 1 / len(AGENT_TEAMS) for agent in AGENT_TEAMS}
@@ -744,6 +937,7 @@ def train_lead_agent(
             "weights": normalized,
             "avg_scores": avg_scores,
             "diff_scores": diff_scores,
+            "momentum": momentum_scores,
             "window_reports": window_reports,
             "meta": {
                 "decay_gamma": decay_gamma,
@@ -755,8 +949,11 @@ def train_lead_agent(
     for agent in AGENT_TEAMS:
         avg_scores[agent] /= active_weight_total
         diff_scores[agent] /= active_weight_total
+        momentum_scores[agent] /= active_weight_total
         performance_multiplier = max(0.05, 1.0 + learning_rate * diff_scores[agent])
-        weights[agent] = max(0.05, prior_weights[agent] * performance_multiplier)
+        # 动量加成：上升期 +10% 权重，下降期 -10%
+        momentum_bonus = 1.0 + max(-0.1, min(0.1, momentum_scores[agent] * 0.5))
+        weights[agent] = max(0.03, prior_weights[agent] * performance_multiplier * momentum_bonus)
 
     total = sum(weights.values())
     normalized = {agent: weight / total for agent, weight in weights.items()}
@@ -764,6 +961,7 @@ def train_lead_agent(
         "weights": normalized,
         "avg_scores": avg_scores,
         "diff_scores": diff_scores,
+        "momentum": momentum_scores,
         "window_reports": window_reports,
         "meta": {
             "decay_gamma": decay_gamma,
@@ -1080,6 +1278,7 @@ def build_core_pool_snapshot(
     lead_model: Dict[str, Dict[str, float]],
     diff_factor: float,
     runtime_config: Optional[Dict[str, object]] = None,
+    pos_weights: Optional[List[Dict[int, float]]] = None,
 ) -> Dict[str, object]:
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
@@ -1113,6 +1312,14 @@ def build_core_pool_snapshot(
             blue_scores[blue] += weighted_score
             blue_sources[blue].add(agent)
             blue_agent_contrib[blue][agent] = blue_agent_contrib[blue].get(agent, 0.0) + weighted_score
+
+    # 位置加权：根据各号码在6个位置的历史出现频率调整得分
+    if pos_weights:
+        for ball in range(1, 34):
+            if red_scores[ball] <= 0:
+                continue
+            best_pos = max(pos_weights[p].get(ball, 0.5) for p in range(6))
+            red_scores[ball] *= max(0.6, min(1.5, best_pos))
 
     ranked_red = sorted(red_scores.items(), key=lambda item: (-item[1], item[0]))
     ranked_blue = sorted(blue_scores.items(), key=lambda item: (-item[1], item[0]))
@@ -1239,9 +1446,23 @@ def generate_team_matrix_tickets(
     teams: Dict[str, Dict[str, object]],
     lead_model: Dict[str, Dict[str, float]],
     diff_factor: float,
+    records: Optional[List[Dict]] = None,
     runtime_config: Optional[Dict[str, object]] = None,
 ) -> List[Dict[str, object]]:
-    snapshot = build_core_pool_snapshot(teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config)
+    pos = analyze_positions(records) if records else None
+    pos_w = pos.get('pos_weights') if pos else None
+    snapshot = build_core_pool_snapshot(
+        teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config, pos_weights=pos_w
+    )
+    # 蓝球模式加权重排：用全局蓝球模式分析修正聚合结果
+    if records and len(records) >= 5:
+        bp = analyze_blue_patterns(records)
+        bp_scores = bp['blue_scores']
+        blue_pool = list(snapshot.get('blue_pool', []))
+        if blue_pool:
+            reranked = sorted(blue_pool, key=lambda b: bp_scores.get(b, 0.5), reverse=True)
+            snapshot['blue_pool'] = reranked
+            snapshot['blue_scores'] = {b: round(float(bp_scores.get(b, 0.5)), 6) for b in reranked}
     return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
 
 

@@ -73,6 +73,8 @@ def _parse_ticket_numbers(ticket_text: str) -> tuple:
 def _attach_actual_result(payload: Dict[str, object], ticket_text: str, actual_record: Optional[Dict[str, object]]) -> Dict[str, object]:
     if not actual_record:
         return payload
+    if isinstance(payload.get("actual_result"), dict) and "hit_score" in payload["actual_result"]:
+        return payload
     predicted_red, predicted_blue = _parse_ticket_numbers(ticket_text)
     actual_red = sorted(int(ball) for ball in actual_record.get("red_balls", []) or [])
     try:

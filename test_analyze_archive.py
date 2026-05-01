@@ -69,9 +69,9 @@ class AnalyzeArchiveTests(unittest.TestCase):
             )
 
             actual = records[0]["payload"]["actual_result"]
-            self.assertEqual(actual["red_hits"], 1)
+            self.assertEqual(actual["red_hits"], 3)
             self.assertEqual(actual["blue_hit"], 1)
-            self.assertEqual(actual["hit_score"], 2.5)
+            self.assertEqual(actual["hit_score"], 4.5)
             self.assertEqual(actual["actual_red_balls"], [1, 3, 5, 7, 9, 11])
             self.assertEqual(actual["actual_blue_ball"], 7)
 

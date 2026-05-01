@@ -236,27 +236,22 @@ def calculate_enhanced_weights(records, strategy='balanced'):
     sales_analysis = analyze_sales_influence(records)
     visual_analysis = analyze_visual_patterns(records)
     
-    # 综合权重计算
+    # 综合权重计算 - 使用加权求和避免极端值
     red_weights = {}
     for num in range(1, 34):
-        weight = 1.0
-        
-        # 奖池影响权重
-        weight *= pool_analysis['pool_weights'].get(num, 1.0)
-        
-        # 销售额影响权重
-        weight *= sales_analysis['sales_weights'].get(num, 1.0)
-        
-        # 聚集度权重
-        weight *= visual_analysis['cluster_scores'].get(num, 1.0)
-        
+        pool_w = pool_analysis['pool_weights'].get(num, 1.0)
+        sales_w = sales_analysis['sales_weights'].get(num, 1.0)
+        cluster_w = visual_analysis['cluster_scores'].get(num, 1.0)
+        # 加权求和 + 中心化，范围限制在 [0.7, 1.5]
+        weight = (pool_w * 0.4 + sales_w * 0.2 + cluster_w * 0.4)
+        weight = max(0.7, min(1.5, weight))
         red_weights[num] = weight
     
     # 蓝球权重
     blue_weights = {}
     for num in range(1, 17):
-        weight = 1.0
-        weight *= pool_analysis['pool_blue_weights'].get(num, 1.0)
+        weight = pool_analysis['pool_blue_weights'].get(num, 1.0)
+        weight = max(0.7, min(1.5, weight))
         blue_weights[num] = weight
     
     return {

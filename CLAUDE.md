@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code when working in this repository.
 
+## 交流语言
+
+**必须使用中文与用户交流。** 所有解释、说明、决策讨论、问题确认一律用中文输出。
+代码注释、变量名、commit message 等工程内容保持英文。
+
 ## 项目概述
 
 - 项目名称：双色球彩票预测工具
