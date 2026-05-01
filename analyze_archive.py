@@ -4,13 +4,21 @@
 import argparse
 import csv
 import json
+import logging
 import os
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional
 
 from agent_registry import VALID_AGENTS
+from project_config import GLOBAL_CONFIG
 
-DATA_FILE = "lottery_data.json"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+DATA_FILE = GLOBAL_CONFIG.data_file
 
 
 def _is_valid_agent(agent: object) -> bool:

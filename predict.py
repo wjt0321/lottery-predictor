@@ -4,16 +4,23 @@
 
 import argparse
 import json
+import logging
 import os
 import random
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 import math
 
 from agent_registry import AGENT_TEAMS
+from project_config import GLOBAL_CONFIG
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 try:
     from enhanced_analysis import calculate_enhanced_weights, apply_enhanced_weights
@@ -24,73 +31,7 @@ except ImportError:
     apply_enhanced_weights = None
 
 
-@dataclass
-class PredictionConfig:
-    """双色球预测配置类 - 集中管理所有魔法数字"""
-    data_file: str = "lottery_data.json"
-    archive_dir: str = "prediction_archive"
-    draw_weekdays: Tuple[int, ...] = (1, 3, 6)
-    draw_cutoff_hour: int = 21
-    draw_cutoff_minute: int = 30
-    team_ticket_count: int = 5
-    core_red_pool_size: int = 10
-    core_blue_pool_size: int = 3
-    rotation_matrix_type: str = "10_red_guard_6_to_5"
-    rotation_matrix_rows: Tuple[Tuple[int, ...], ...] = field(default_factory=lambda: (
-        (0, 1, 2, 3, 4, 5),
-        (0, 1, 2, 6, 7, 8),
-        (0, 3, 4, 6, 7, 9),
-        (1, 3, 5, 6, 8, 9),
-        (2, 4, 5, 7, 8, 9),
-    ))
-    ticket_decay_step: float = 0.08
-    min_ticket_decay: float = 0.65
-    learning_rate: float = 0.15
-    decay_gamma: float = 0.88
-    default_learn_cycles: int = 24
-    hot_cold_window: int = 40
-    blue_pattern_window: int = 20
-    blue_parity_window: int = 10
-    cycle_max_period: int = 50
-    sum_trend_periods: int = 30
-    zone_balance_periods: int = 20
-    position_analysis_periods: int = 60
-    min_ticket_weight: float = 0.03
-    min_pool_score: float = 0.0001
-    diversity_overlap_threshold: int = 4
-    diversity_max_attempts: int = 4
-    diversity_penalty_factor: float = 0.62
-    blue_repeat_high_rate: float = 0.08
-    blue_repeat_bonus: float = 1.5
-    blue_repeat_penalty: float = 0.8
-    missing_threshold: int = 20
-    missing_bonus: float = 1.15
-    missing_penalty: float = 0.9
-    pos_weight_min: float = 0.6
-    pos_weight_max: float = 1.5
-
-    def to_runtime_config(self) -> Dict:
-        """转换为运行时配置字典"""
-        row_count = len(self.rotation_matrix_rows)
-        return {
-            "pool_params": {
-                "core_red_pool_size": self.core_red_pool_size,
-                "core_blue_pool_size": self.core_blue_pool_size,
-            },
-            "fusion_params": {
-                "ticket_decay_step": self.ticket_decay_step,
-                "min_ticket_decay": self.min_ticket_decay,
-            },
-            "matrix_params": {
-                "matrix_type": self.rotation_matrix_type,
-                "preferred_rows": list(range(1, row_count + 1)),
-                "row_weights": {str(i): 1.0 / row_count for i in range(1, row_count + 1)},
-            },
-        }
-
-
-CONFIG = PredictionConfig()
-
+CONFIG = GLOBAL_CONFIG
 DATA_FILE = CONFIG.data_file
 ARCHIVE_DIR = CONFIG.archive_dir
 DRAW_WEEKDAYS = set(CONFIG.draw_weekdays)
@@ -110,8 +51,10 @@ def load_data():
         return json.load(f)
 
 
-def analyze_hot_cold(records, recent_periods=40):
+def analyze_hot_cold(records, recent_periods=None):
     """冷热号分析 - 优化：增加蓝球冷号分析；扩大窗口至40期捕捉更长趋势"""
+    if recent_periods is None:
+        recent_periods = CONFIG.hot_cold_window
     recent = records[:recent_periods]
     red_counts = Counter()
     blue_counts = Counter()
