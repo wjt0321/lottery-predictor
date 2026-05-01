@@ -1655,6 +1655,23 @@ def build_lead_agent_report(
     }
 
 
+def next_draw_date_str(records: List[Dict]) -> str:
+    """计算下一期开奖日期（双色球每周二四日开奖）"""
+    DRAW_WEEKDAYS = {1, 3, 6}  # Tuesday=1, Thursday=3, Sunday=6
+    if records:
+        latest_date_str = str(records[0].get("date", "")).strip()
+        try:
+            latest_date = datetime.strptime(latest_date_str, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            latest_date = datetime.now().date()
+    else:
+        latest_date = datetime.now().date()
+    next_date = latest_date + timedelta(days=1)
+    while next_date.weekday() not in DRAW_WEEKDAYS:
+        next_date += timedelta(days=1)
+    weekdays_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    return f"{next_date.strftime('%m月%d日')} {weekdays_cn[next_date.weekday()]}"
+
 def next_target_period(records: List[Dict]) -> str:
     if not records:
         return datetime.now().strftime("%Y%m%d")
@@ -1817,6 +1834,8 @@ def main():
 
         print("\n团队融合结果:")
         target_period = next_target_period(records)
+        next_date = next_draw_date_str(records)
+        print(f"📅 预测期号: {target_period} | 预计开奖: {next_date}")
         final_tickets = generate_team_matrix_tickets(
             expert_teams,
             lead_model=lead_model,
