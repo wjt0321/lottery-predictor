@@ -53,6 +53,7 @@ playwright/.cache/
 
 # Project specific
 .trae/
+.codex_tmp/
 
 #这个文件是pytest的缓存文件，需要忽略
 .pytest_cache/

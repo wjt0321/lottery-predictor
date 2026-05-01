@@ -12,6 +12,12 @@
   },
   "matrix_params": {
     "matrix_type": "10_red_guard_6_to_5",
-    "preferred_rows": []
+    "preferred_rows": [
+      1,
+      3,
+      5,
+      2,
+      4
+    ]
   }
 }

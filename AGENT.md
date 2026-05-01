@@ -40,6 +40,7 @@
 
 - `prediction_archive/*.txt` 记录每期归档。
 - `analyze_archive.py` 负责读取 `ticketN_explain_json` 做离线分析。
+- 分析时会用本地 `lottery_data.json` 为已开奖归档临时回填 `actual_result`，专家排行优先统计命中球贡献；缺少真实结果时才回退为解释贡献。
 - 当前可导出的补丁文件：
   - `config/weight_patch.latest.json`
   - `config/matrix_patch.latest.json`

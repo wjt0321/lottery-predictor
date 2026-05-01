@@ -91,7 +91,7 @@ python -m unittest -v
 
 - `analyze_archive.py` 会读取 `prediction_archive/*.txt`
 - 当前会导出：
-  - 贡献排行
+  - 命中贡献排行（可用 `lottery_data.json` 回填真实开奖结果）
   - 双视角差异
   - 矩阵行表现
   - 权重补丁

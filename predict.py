@@ -511,6 +511,15 @@ def _normalize_agent_weights(raw_weights: Dict[str, float]) -> Dict[str, float]:
     return {agent: cleaned[agent] / total for agent in AGENT_TEAMS}
 
 
+def _stable_int_seed(*parts: object) -> int:
+    """Build a repeatable seed from plain values without relying on hash()."""
+    text = "|".join(str(part) for part in parts)
+    acc = 0
+    for char in text:
+        acc = (acc * 131 + ord(char)) % (2**32)
+    return acc
+
+
 def load_weight_patch(patch_path: Optional[str]) -> Optional[Dict[str, float]]:
     if not patch_path:
         return None
@@ -648,7 +657,8 @@ def _window_agent_performance(
         round_weight = decay_gamma ** (len(samples) - idx - 1)
         per_round_scores = {}
         for agent in AGENT_TEAMS:
-            red, blue = generate_prediction(history, strategy=agent, rng=random.Random())
+            rng = random.Random(_stable_int_seed("lead", cycles, target.get("period", idx), agent))
+            red, blue = generate_prediction(history, strategy=agent, rng=rng)
             per_round_scores[agent] = _ticket_score(red, blue, target)
 
         team_avg = sum(per_round_scores.values()) / len(per_round_scores)
@@ -700,9 +710,10 @@ def train_lead_agent(
     normalized_window_weights = _normalize_weights(raw_weights)
     initial_normalized = _normalize_agent_weights(initial_weights or {})
     if initial_weights:
-        weights = {agent: max(0.05, initial_normalized[agent] * len(AGENT_TEAMS)) for agent in AGENT_TEAMS}
+        prior_weights = {agent: max(0.05, initial_normalized[agent] * len(AGENT_TEAMS)) for agent in AGENT_TEAMS}
     else:
-        weights = {agent: 1.0 for agent in AGENT_TEAMS}
+        prior_weights = {agent: 1.0 for agent in AGENT_TEAMS}
+    weights = dict(prior_weights)
     avg_scores = {agent: 0.0 for agent in AGENT_TEAMS}
     diff_scores = {agent: 0.0 for agent in AGENT_TEAMS}
     window_reports = []
@@ -744,7 +755,8 @@ def train_lead_agent(
     for agent in AGENT_TEAMS:
         avg_scores[agent] /= active_weight_total
         diff_scores[agent] /= active_weight_total
-        weights[agent] = max(0.05, 1.0 + learning_rate * diff_scores[agent])
+        performance_multiplier = max(0.05, 1.0 + learning_rate * diff_scores[agent])
+        weights[agent] = max(0.05, prior_weights[agent] * performance_multiplier)
 
     total = sum(weights.values())
     normalized = {agent: weight / total for agent, weight in weights.items()}
@@ -796,7 +808,8 @@ def backtest_report(
             round_weight = decay_gamma ** (len(samples) - idx - 1)
             team_round_scores = []
             for agent in AGENT_TEAMS:
-                red, blue = generate_prediction(history, strategy=agent, rng=random.Random())
+                rng = random.Random(_stable_int_seed("backtest", w, target.get("period", idx), agent))
+                red, blue = generate_prediction(history, strategy=agent, rng=rng)
                 score = _ticket_score(red, blue, target)
                 red_hits = len(set(red) & set(target["red_balls"]))
                 blue_hit = 1 if blue == target["blue_ball"] else 0

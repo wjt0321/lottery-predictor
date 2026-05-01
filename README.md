@@ -131,7 +131,7 @@ python manual_data_import.py --txt data.txt
 
 ### 4. analyze_archive.py - 归档分析与补丁导出
 
-读取 `prediction_archive` 中的 `ticketN_explain_json`，输出贡献排行、双视角差异、建议权重增减量、矩阵行表现，并可导出报告与三类补丁。
+读取 `prediction_archive` 中的 `ticketN_explain_json`，并自动用本地 `lottery_data.json` 回填已开奖期的真实命中结果。分析器会输出命中贡献排行、双视角差异、建议权重增减量、矩阵行表现，并可导出报告与三类补丁；如果找不到真实结果，则回退为解释贡献统计。
 
 ```bash
 # 基础分析
@@ -165,9 +165,9 @@ python analyze_archive.py \
 - `--latest-param-patch-path`: 固定写回最新参数补丁路径（默认 `config/param_patch.latest.json`）
 
 **补丁文件说明**：
-- `weight patch`：用于调整 8 位专家的基础权重
-- `matrix patch`：用于记录矩阵行表现、行权重和偏好行顺序
-- `param patch`：用于回灌核心池大小、出票衰减参数和矩阵偏好参数
+- `weight patch`：用于调整 8 位专家的基础权重，优先基于真实命中贡献生成
+- `matrix patch`：用于记录矩阵行表现与行权重
+- `param patch`：用于回灌核心池大小、出票衰减参数和完整矩阵偏好顺序
 
 ## 预测策略
 
@@ -226,7 +226,8 @@ python predict.py --advanced --num 5
 #### 3. 自学习闭环
 
 - 历史归档会保留每注解释信息，供后续回测分析
-- `analyze_archive.py` 负责离线学习，当前可输出贡献排行、双视角差异、矩阵行表现以及三类补丁
+- `analyze_archive.py` 负责离线学习，当前可输出命中贡献排行、双视角差异、矩阵行表现以及三类补丁
+- 分析器会根据本地真实开奖数据给旧归档临时补齐 `actual_result`，避免只按预测解释的“自我贡献”调权
 - 当前闭环已经升级为“权重 + 矩阵 + 参数”联合学习
 
 #### 4. 补丁回灌规则

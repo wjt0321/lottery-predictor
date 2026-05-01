@@ -39,6 +39,42 @@ class AnalyzeArchiveTests(unittest.TestCase):
             self.assertEqual(records[0]["ticket_index"], 1)
             self.assertEqual(records[0]["payload"]["sources"], ["hot", "cycle"])
 
+    def test_collect_explain_json_records_attaches_actual_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_archive(
+                temp_dir,
+                "2026036",
+                [
+                    {
+                        "sources": ["hot"],
+                        "red": [
+                            {"ball": 1, "agent_contributions": {"hot": 0.7}},
+                            {"ball": 2, "agent_contributions": {"cold": 0.6}},
+                        ],
+                        "blue": {"ball": 7, "agent_contributions": {"hot": 0.4}},
+                        "matrix": {"type": "10_red_guard_6_to_5", "row_id": 1},
+                    }
+                ],
+            )
+
+            records = analyze_archive.collect_explain_json_records(
+                temp_dir,
+                actual_records=[
+                    {
+                        "period": "2026036",
+                        "red_balls": [1, 3, 5, 7, 9, 11],
+                        "blue_ball": 7,
+                    }
+                ],
+            )
+
+            actual = records[0]["payload"]["actual_result"]
+            self.assertEqual(actual["red_hits"], 1)
+            self.assertEqual(actual["blue_hit"], 1)
+            self.assertEqual(actual["hit_score"], 2.5)
+            self.assertEqual(actual["actual_red_balls"], [1, 3, 5, 7, 9, 11])
+            self.assertEqual(actual["actual_blue_ball"], 7)
+
     def test_build_agent_ranking_and_suggestions(self):
         records = [
             {
@@ -86,6 +122,34 @@ class AnalyzeArchiveTests(unittest.TestCase):
         agents = [row["agent"] for row in ranking]
         self.assertIn("hot", agents)
         self.assertNotIn("lstm", agents)
+
+    def test_build_agent_ranking_uses_only_hit_contributions_when_actual_result_exists(self):
+        records = [
+            {
+                "period": "2026036",
+                "ticket_index": 1,
+                "payload": {
+                    "sources": ["hot", "cold"],
+                    "red": [
+                        {"ball": 1, "agent_contributions": {"hot": 0.4}},
+                        {"ball": 2, "agent_contributions": {"cold": 9.0}},
+                    ],
+                    "blue": {"ball": 7, "agent_contributions": {"hot": 0.5}},
+                    "actual_result": {
+                        "actual_red_balls": [1, 3, 5, 7, 9, 11],
+                        "actual_blue_ball": 7,
+                        "red_hits": 1,
+                        "blue_hit": 1,
+                        "hit_score": 2.5,
+                    },
+                },
+            }
+        ]
+
+        ranking = analyze_archive.build_agent_ranking(records)
+
+        self.assertEqual(ranking[0]["agent"], "hot")
+        self.assertGreater(ranking[0]["score"], ranking[1]["score"])
 
     def test_export_reports_and_dual_view_delta(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -297,7 +361,7 @@ class AnalyzeArchiveTests(unittest.TestCase):
         self.assertEqual(payload["pool_params"]["core_blue_pool_size"], 3)
         self.assertIn("ticket_decay_step", payload["fusion_params"])
         self.assertEqual(payload["matrix_params"]["matrix_type"], "10_red_guard_6_to_5")
-        self.assertEqual(payload["matrix_params"]["preferred_rows"], [1, 4])
+        self.assertEqual(payload["matrix_params"]["preferred_rows"], [1, 4, 2, 3, 5])
 
     def test_export_reports_writes_param_patch_and_latest_copy(self):
         with tempfile.TemporaryDirectory() as temp_dir:

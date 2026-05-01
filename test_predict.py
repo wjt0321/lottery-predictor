@@ -424,6 +424,24 @@ class PredictFlowTests(unittest.TestCase):
         self.assertIn("meta", lead)
         self.assertEqual(lead["meta"]["initial_weights_applied"], True)
 
+    def test_train_lead_agent_keeps_initial_weights_as_prior(self):
+        records = self._build_mock_records(72)
+        initial = {agent: (20.0 if agent == "hot" else 1.0) for agent in predict.AGENT_TEAMS}
+
+        lead = predict.train_lead_agent(records, learning_cycles=12, initial_weights=initial)
+
+        self.assertEqual(max(lead["weights"], key=lead["weights"].get), "hot")
+        self.assertGreater(lead["weights"]["hot"], lead["weights"]["balanced"])
+
+    def test_train_lead_agent_is_deterministic_for_same_records(self):
+        records = self._build_mock_records(72)
+
+        first = predict.train_lead_agent(records, learning_cycles=12)
+        second = predict.train_lead_agent(records, learning_cycles=12)
+
+        self.assertEqual(first["weights"], second["weights"])
+        self.assertEqual(first["avg_scores"], second["avg_scores"])
+
     def test_auto_discover_weight_patch_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_dir = f"{temp_dir}/config"

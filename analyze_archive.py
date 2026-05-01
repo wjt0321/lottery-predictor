@@ -10,6 +10,8 @@ from typing import Dict, List, Optional
 
 from agent_registry import VALID_AGENTS
 
+DATA_FILE = "lottery_data.json"
+
 
 def _is_valid_agent(agent: object) -> bool:
     return str(agent) in VALID_AGENTS
@@ -35,10 +37,70 @@ def _parse_archive_kv(file_path: str) -> Dict[str, str]:
     return values
 
 
-def collect_explain_json_records(archive_dir: str, limit_files: Optional[int] = None) -> List[Dict[str, object]]:
+def load_actual_records(data_file: str = DATA_FILE) -> List[Dict[str, object]]:
+    if not data_file or not os.path.isfile(data_file):
+        return []
+    try:
+        with open(data_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return []
+    records = payload.get("records", []) if isinstance(payload, dict) else []
+    return records if isinstance(records, list) else []
+
+
+def _actual_record_map(actual_records: Optional[List[Dict[str, object]]]) -> Dict[str, Dict[str, object]]:
+    result: Dict[str, Dict[str, object]] = {}
+    for record in actual_records or []:
+        if not isinstance(record, dict):
+            continue
+        period = str(record.get("period", "")).strip()
+        if period:
+            result[period] = record
+    return result
+
+
+def _parse_ticket_numbers(ticket_text: str) -> tuple:
+    ticket_part = str(ticket_text or "").split("|", 1)[0]
+    red_part, blue_part = ("", "0")
+    if "+" in ticket_part:
+        red_part, blue_part = ticket_part.split("+", 1)
+    red_numbers = [int(token) for token in red_part.split() if token.isdigit()]
+    blue_text = "".join(ch for ch in blue_part if ch.isdigit())
+    return sorted(red_numbers[:6]), int(blue_text or "0")
+
+
+def _attach_actual_result(payload: Dict[str, object], ticket_text: str, actual_record: Optional[Dict[str, object]]) -> Dict[str, object]:
+    if not actual_record:
+        return payload
+    predicted_red, predicted_blue = _parse_ticket_numbers(ticket_text)
+    actual_red = sorted(int(ball) for ball in actual_record.get("red_balls", []) or [])
+    try:
+        actual_blue = int(actual_record.get("blue_ball", 0))
+    except Exception:
+        actual_blue = 0
+    red_hits = len(set(predicted_red) & set(actual_red))
+    blue_hit = 1 if predicted_blue == actual_blue else 0
+    enriched = dict(payload)
+    enriched["actual_result"] = {
+        "red_hits": red_hits,
+        "blue_hit": blue_hit,
+        "hit_score": red_hits + blue_hit * 1.5,
+        "actual_red_balls": actual_red,
+        "actual_blue_ball": actual_blue,
+    }
+    return enriched
+
+
+def collect_explain_json_records(
+    archive_dir: str,
+    limit_files: Optional[int] = None,
+    actual_records: Optional[List[Dict[str, object]]] = None,
+) -> List[Dict[str, object]]:
     files = _iter_archive_files(archive_dir)
     if limit_files is not None:
         files = files[: max(0, int(limit_files))]
+    actual_map = _actual_record_map(load_actual_records() if actual_records is None else actual_records)
     rows: List[Dict[str, object]] = []
     for file_path in files:
         values = _parse_archive_kv(file_path)
@@ -55,6 +117,7 @@ def collect_explain_json_records(archive_dir: str, limit_files: Optional[int] = 
                 continue
             if not isinstance(payload, dict):
                 continue
+            payload = _attach_actual_result(payload, values.get(ticket_part, ""), actual_map.get(str(period)))
             rows.append(
                 {
                     "period": str(period),
@@ -80,8 +143,15 @@ def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, obje
         for agent in payload.get("sources", []) or []:
             if _is_valid_agent(agent):
                 source_count[str(agent)] += 1
+                score_by_agent.setdefault(str(agent), 0.0)
+        actual_result = payload.get("actual_result", {}) or {}
+        actual_red = set(actual_result.get("actual_red_balls", []) or []) if isinstance(actual_result, dict) else set()
+        actual_blue = actual_result.get("actual_blue_ball") if isinstance(actual_result, dict) else None
+        has_actual_balls = bool(actual_red) and actual_blue is not None
         for red in payload.get("red", []) or []:
             if not isinstance(red, dict):
+                continue
+            if has_actual_balls and int(red.get("ball", 0)) not in actual_red:
                 continue
             contribs = red.get("agent_contributions", {}) or {}
             if isinstance(contribs, dict):
@@ -94,6 +164,8 @@ def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, obje
                         continue
         blue = payload.get("blue", {}) or {}
         if isinstance(blue, dict):
+            if has_actual_balls and int(blue.get("ball", 0)) != int(actual_blue):
+                continue
             contribs = blue.get("agent_contributions", {}) or {}
             if isinstance(contribs, dict):
                 for agent, val in contribs.items():
@@ -190,9 +262,9 @@ def build_tuning_suggestions(ranking: List[Dict[str, object]], records: List[Dic
     bottom_agents = [row["agent"] for row in ranking[-3:]] if len(ranking) >= 3 else []
 
     if top_agents:
-        lines.append(f"建议提高权重倾斜：TOP3={','.join(top_agents)}（在 explain_json 贡献累计更高）。")
+        lines.append(f"建议提高权重倾斜：TOP3={','.join(top_agents)}（命中贡献累计更高；缺少真实结果时回退为 explain_json 贡献）。")
     if bottom_agents:
-        lines.append(f"建议降低或观察：BOTTOM3={','.join(bottom_agents)}（在 explain_json 贡献累计偏低）。")
+        lines.append(f"建议降低或观察：BOTTOM3={','.join(bottom_agents)}（命中贡献累计偏低；缺少真实结果时回退为 explain_json 贡献）。")
 
     replacement_total = 0
     ticket_total = 0
@@ -358,7 +430,17 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
     total_records = max(len(records), 1)
     avg_red_pool = max(red_pool_sizes) if red_pool_sizes else 10
     avg_blue_pool = max(blue_pool_sizes) if blue_pool_sizes else 3
-    preferred_rows = [int(row.get("row_id")) for row in matrix_ranking[: min(3, len(matrix_ranking))] if row.get("row_id") is not None]
+    preferred_rows = []
+    for row in matrix_ranking:
+        try:
+            row_id = int(row.get("row_id"))
+        except Exception:
+            continue
+        if 1 <= row_id <= 5 and row_id not in preferred_rows:
+            preferred_rows.append(row_id)
+    for row_id in range(1, 6):
+        if row_id not in preferred_rows:
+            preferred_rows.append(row_id)
     diversity_rate = diversity_trigger_count / total_records
 
     return {
@@ -501,7 +583,7 @@ def render_report(
     lines.append(f"归档目录: {archive_dir}")
     lines.append(f"解析到 explain_json 的票据数: {len(records)}")
     lines.append("")
-    lines.append("Agent 贡献排行榜（累计贡献值）:")
+    lines.append("Agent 命中贡献排行榜（有真实结果时只统计命中球贡献）:")
     for idx, row in enumerate(ranking[: max(1, int(top_k))], start=1):
         lines.append(
             f"  {idx:02d}. {row['agent']:8s} score={row['score']:.6f} | 来源占比={row['source_share']:.2%} | 来源次数={row['source_count']}"

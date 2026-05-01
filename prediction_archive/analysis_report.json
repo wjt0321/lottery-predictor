@@ -2,199 +2,250 @@
   "all_time_ranking": [
     {
       "agent": "zone",
-      "score": 24.344945,
-      "source_share": 0.4571,
-      "source_count": 16
-    },
-    {
-      "agent": "balanced",
-      "score": 23.406676,
-      "source_share": 0.6286,
-      "source_count": 22
-    },
-    {
-      "agent": "hot",
-      "score": 18.338949,
-      "source_share": 0.9143,
-      "source_count": 32
-    },
-    {
-      "agent": "missing",
-      "score": 15.813658,
-      "source_share": 0.8,
-      "source_count": 28
-    },
-    {
-      "agent": "cycle",
-      "score": 14.668958,
-      "source_share": 0.6571,
-      "source_count": 23
-    },
-    {
-      "agent": "random",
-      "score": 14.047355,
-      "source_share": 0.7714,
-      "source_count": 27
-    },
-    {
-      "agent": "cold",
-      "score": 12.957882,
-      "source_share": 0.9429,
-      "source_count": 33
+      "score": 17.580085,
+      "source_share": 0.6545,
+      "source_count": 36
     },
     {
       "agent": "sum",
-      "score": 11.804365,
-      "source_share": 0.5143,
-      "source_count": 18
+      "score": 13.015542,
+      "source_share": 0.6909,
+      "source_count": 38
+    },
+    {
+      "agent": "hot",
+      "score": 10.563634,
+      "source_share": 0.9455,
+      "source_count": 52
+    },
+    {
+      "agent": "cycle",
+      "score": 10.462837,
+      "source_share": 0.7818,
+      "source_count": 43
+    },
+    {
+      "agent": "balanced",
+      "score": 9.563476,
+      "source_share": 0.7636,
+      "source_count": 42
+    },
+    {
+      "agent": "missing",
+      "score": 8.943823,
+      "source_share": 0.8727,
+      "source_count": 48
+    },
+    {
+      "agent": "random",
+      "score": 7.265845,
+      "source_share": 0.8545,
+      "source_count": 47
+    },
+    {
+      "agent": "cold",
+      "score": 7.001145,
+      "source_share": 0.9636,
+      "source_count": 53
     }
   ],
   "recent_ranking": [
     {
       "agent": "zone",
-      "score": 19.490784,
-      "source_share": 0.6,
-      "source_count": 12
-    },
-    {
-      "agent": "balanced",
-      "score": 18.911979,
-      "source_share": 0.7,
-      "source_count": 14
+      "score": 13.126629,
+      "source_share": 1.0,
+      "source_count": 20
     },
     {
       "agent": "hot",
-      "score": 14.029336,
-      "source_share": 0.9,
-      "source_count": 18
+      "score": 9.364632,
+      "source_share": 1.0,
+      "source_count": 20
     },
     {
-      "agent": "missing",
-      "score": 13.031439,
-      "source_share": 0.9,
-      "source_count": 18
+      "agent": "sum",
+      "score": 8.93026,
+      "source_share": 1.0,
+      "source_count": 20
     },
     {
       "agent": "cycle",
-      "score": 12.050805,
-      "source_share": 0.75,
-      "source_count": 15
-    },
-    {
-      "agent": "cold",
-      "score": 10.268921,
+      "score": 6.192448,
       "source_share": 1.0,
       "source_count": 20
     },
     {
       "agent": "random",
-      "score": 9.844208,
-      "source_share": 0.8,
-      "source_count": 16
+      "score": 5.443043,
+      "source_share": 1.0,
+      "source_count": 20
     },
     {
-      "agent": "sum",
-      "score": 9.323908,
-      "source_share": 0.7,
-      "source_count": 14
+      "agent": "balanced",
+      "score": 5.108159,
+      "source_share": 1.0,
+      "source_count": 20
+    },
+    {
+      "agent": "missing",
+      "score": 4.666998,
+      "source_share": 1.0,
+      "source_count": 20
+    },
+    {
+      "agent": "cold",
+      "score": 3.21063,
+      "source_share": 1.0,
+      "source_count": 20
     }
   ],
   "delta_ranking": [
     {
-      "agent": "sum",
-      "recent_score": 9.323908,
-      "all_time_score": 11.804365,
-      "delta": -2.480457
-    },
-    {
-      "agent": "cycle",
-      "recent_score": 12.050805,
-      "all_time_score": 14.668958,
-      "delta": -2.618153
-    },
-    {
-      "agent": "cold",
-      "recent_score": 10.268921,
-      "all_time_score": 12.957882,
-      "delta": -2.688961
-    },
-    {
-      "agent": "missing",
-      "recent_score": 13.031439,
-      "all_time_score": 15.813658,
-      "delta": -2.782219
+      "agent": "hot",
+      "recent_score": 9.364632,
+      "all_time_score": 10.563634,
+      "delta": -1.199002
     },
     {
       "agent": "random",
-      "recent_score": 9.844208,
-      "all_time_score": 14.047355,
-      "delta": -4.203147
+      "recent_score": 5.443043,
+      "all_time_score": 7.265845,
+      "delta": -1.822802
     },
     {
-      "agent": "hot",
-      "recent_score": 14.029336,
-      "all_time_score": 18.338949,
-      "delta": -4.309613
+      "agent": "cold",
+      "recent_score": 3.21063,
+      "all_time_score": 7.001145,
+      "delta": -3.790515
     },
     {
-      "agent": "balanced",
-      "recent_score": 18.911979,
-      "all_time_score": 23.406676,
-      "delta": -4.494697
+      "agent": "sum",
+      "recent_score": 8.93026,
+      "all_time_score": 13.015542,
+      "delta": -4.085282
+    },
+    {
+      "agent": "cycle",
+      "recent_score": 6.192448,
+      "all_time_score": 10.462837,
+      "delta": -4.270389
+    },
+    {
+      "agent": "missing",
+      "recent_score": 4.666998,
+      "all_time_score": 8.943823,
+      "delta": -4.276825
     },
     {
       "agent": "zone",
-      "recent_score": 19.490784,
-      "all_time_score": 24.344945,
-      "delta": -4.854161
+      "recent_score": 13.126629,
+      "all_time_score": 17.580085,
+      "delta": -4.453456
+    },
+    {
+      "agent": "balanced",
+      "recent_score": 5.108159,
+      "all_time_score": 9.563476,
+      "delta": -4.455317
     }
   ],
   "weight_adjustments": [
     {
-      "agent": "sum",
-      "delta": -2.480457,
-      "weight_delta": -0.0102
-    },
-    {
-      "agent": "cycle",
-      "delta": -2.618153,
-      "weight_delta": -0.0108
-    },
-    {
-      "agent": "cold",
-      "delta": -2.688961,
-      "weight_delta": -0.0111
-    },
-    {
-      "agent": "missing",
-      "delta": -2.782219,
-      "weight_delta": -0.0115
+      "agent": "hot",
+      "delta": -1.199002,
+      "weight_delta": -0.0054
     },
     {
       "agent": "random",
-      "delta": -4.203147,
-      "weight_delta": -0.0173
+      "delta": -1.822802,
+      "weight_delta": -0.0082
     },
     {
-      "agent": "hot",
-      "delta": -4.309613,
-      "weight_delta": -0.0178
+      "agent": "cold",
+      "delta": -3.790515,
+      "weight_delta": -0.017
     },
     {
-      "agent": "balanced",
-      "delta": -4.494697,
-      "weight_delta": -0.0185
+      "agent": "sum",
+      "delta": -4.085282,
+      "weight_delta": -0.0183
+    },
+    {
+      "agent": "cycle",
+      "delta": -4.270389,
+      "weight_delta": -0.0192
+    },
+    {
+      "agent": "missing",
+      "delta": -4.276825,
+      "weight_delta": -0.0192
     },
     {
       "agent": "zone",
-      "delta": -4.854161,
+      "delta": -4.453456,
+      "weight_delta": -0.02
+    },
+    {
+      "agent": "balanced",
+      "delta": -4.455317,
       "weight_delta": -0.02
     }
   ],
-  "matrix_ranking": [],
+  "matrix_ranking": [
+    {
+      "matrix_type": "10_red_guard_6_to_5",
+      "row_id": 1,
+      "samples": 5,
+      "red_hit_avg": 1.4,
+      "blue_hit_rate": 0.0,
+      "hit_rate_ge2": 0.4,
+      "hit_rate_ge3": 0.0,
+      "avg_score": 1.4
+    },
+    {
+      "matrix_type": "10_red_guard_6_to_5",
+      "row_id": 3,
+      "samples": 5,
+      "red_hit_avg": 1.2,
+      "blue_hit_rate": 0.0,
+      "hit_rate_ge2": 0.2,
+      "hit_rate_ge3": 0.0,
+      "avg_score": 1.2
+    },
+    {
+      "matrix_type": "10_red_guard_6_to_5",
+      "row_id": 5,
+      "samples": 5,
+      "red_hit_avg": 1.2,
+      "blue_hit_rate": 0.0,
+      "hit_rate_ge2": 0.4,
+      "hit_rate_ge3": 0.2,
+      "avg_score": 1.2
+    },
+    {
+      "matrix_type": "10_red_guard_6_to_5",
+      "row_id": 2,
+      "samples": 5,
+      "red_hit_avg": 0.8,
+      "blue_hit_rate": 0.0,
+      "hit_rate_ge2": 0.0,
+      "hit_rate_ge3": 0.0,
+      "avg_score": 0.8
+    },
+    {
+      "matrix_type": "10_red_guard_6_to_5",
+      "row_id": 4,
+      "samples": 5,
+      "red_hit_avg": 0.8,
+      "blue_hit_rate": 0.0,
+      "hit_rate_ge2": 0.2,
+      "hit_rate_ge3": 0.0,
+      "avg_score": 0.8
+    }
+  ],
   "suggestions": [
-    "建议提高权重倾斜：TOP3=zone,balanced,hot（在 explain_json 贡献累计更高）。",
-    "建议降低或观察：BOTTOM3=random,cold,sum（在 explain_json 贡献累计偏低）。",
+    "建议提高权重倾斜：TOP3=zone,sum,hot（命中贡献累计更高；缺少真实结果时回退为 explain_json 贡献）。",
+    "建议降低或观察：BOTTOM3=missing,random,cold（命中贡献累计偏低；缺少真实结果时回退为 explain_json 贡献）。",
     "多样性替换触发率：0.00%（越高表示号码集中度越高，可考虑加强多样性惩罚或增加注间差异约束）。",
     "下一步可做自动调参：把 lead_model 权重/learning_rate/decay_gamma 作为变量，按 backtest_report 的 overall 指标网格搜索。"
   ]

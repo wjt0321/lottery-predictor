@@ -36,6 +36,7 @@ description: Use when user asks for Double Color Ball (双色球) prediction, nu
 - 若本地开奖数据落后于最近应开奖日，`predict.py` 会阻断预测并提示先运行 `python update_data.py`
 - 归档文件会记录 `lead_summary`，其中包含 `patch_source`（`explicit/default/none`）
 - 每注可解释信息在 `ticketN_explain` 与 `ticketN_explain_json`
+- 归档分析会用 `lottery_data.json` 对已开奖期临时回填 `actual_result`，权重补丁优先依据真实命中贡献生成
 
 ## 详细文档
 - 详细参数、策略说明、长示例请查看 [README.md](./README.md)

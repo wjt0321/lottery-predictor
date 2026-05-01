@@ -1,7 +1,19 @@
 {
   "version": 1,
-  "matrix_type": "",
-  "row_weights": {},
-  "row_scores": {},
+  "matrix_type": "10_red_guard_6_to_5",
+  "row_weights": {
+    "1": 0.259259,
+    "3": 0.222222,
+    "5": 0.222222,
+    "2": 0.148148,
+    "4": 0.148148
+  },
+  "row_scores": {
+    "1": 1.4,
+    "3": 1.2,
+    "5": 1.2,
+    "2": 0.8,
+    "4": 0.8
+  },
   "origin": "analyze_archive"
 }
