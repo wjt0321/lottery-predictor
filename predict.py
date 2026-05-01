@@ -8,13 +8,13 @@ import os
 import random
 import sys
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 import math
 
 from agent_registry import AGENT_TEAMS
 
-# 尝试导入增强分析模块
 try:
     from enhanced_analysis import calculate_enhanced_weights, apply_enhanced_weights
     ENHANCED_AVAILABLE = True
@@ -24,37 +24,84 @@ except ImportError:
     apply_enhanced_weights = None
 
 
-DATA_FILE = "lottery_data.json"
-ARCHIVE_DIR = "prediction_archive"
-DRAW_WEEKDAYS = {1, 3, 6}  # 周二、周四、周日
-DRAW_CUTOFF_HOUR = 21
-DRAW_CUTOFF_MINUTE = 30
-TEAM_TICKET_COUNT = 5
-CORE_RED_POOL_SIZE = 10
-CORE_BLUE_POOL_SIZE = 3
-ROTATION_MATRIX_TYPE = "10_red_guard_6_to_5"
-ROTATION_MATRIX_ROWS = (
-    (0, 1, 2, 3, 4, 5),
-    (0, 1, 2, 6, 7, 8),
-    (0, 3, 4, 6, 7, 9),
-    (1, 3, 5, 6, 8, 9),
-    (2, 4, 5, 7, 8, 9),
-)
-DEFAULT_RUNTIME_CONFIG = {
-    "pool_params": {
-        "core_red_pool_size": CORE_RED_POOL_SIZE,
-        "core_blue_pool_size": CORE_BLUE_POOL_SIZE,
-    },
-    "fusion_params": {
-        "ticket_decay_step": 0.08,
-        "min_ticket_decay": 0.65,
-    },
-    "matrix_params": {
-        "matrix_type": ROTATION_MATRIX_TYPE,
-        "preferred_rows": [1, 2, 3, 4, 5],
-        "row_weights": {str(index + 1): 1.0 / len(ROTATION_MATRIX_ROWS) for index in range(len(ROTATION_MATRIX_ROWS))},
-    },
-}
+@dataclass
+class PredictionConfig:
+    """双色球预测配置类 - 集中管理所有魔法数字"""
+    data_file: str = "lottery_data.json"
+    archive_dir: str = "prediction_archive"
+    draw_weekdays: Tuple[int, ...] = (1, 3, 6)
+    draw_cutoff_hour: int = 21
+    draw_cutoff_minute: int = 30
+    team_ticket_count: int = 5
+    core_red_pool_size: int = 10
+    core_blue_pool_size: int = 3
+    rotation_matrix_type: str = "10_red_guard_6_to_5"
+    rotation_matrix_rows: Tuple[Tuple[int, ...], ...] = field(default_factory=lambda: (
+        (0, 1, 2, 3, 4, 5),
+        (0, 1, 2, 6, 7, 8),
+        (0, 3, 4, 6, 7, 9),
+        (1, 3, 5, 6, 8, 9),
+        (2, 4, 5, 7, 8, 9),
+    ))
+    ticket_decay_step: float = 0.08
+    min_ticket_decay: float = 0.65
+    learning_rate: float = 0.15
+    decay_gamma: float = 0.88
+    default_learn_cycles: int = 24
+    hot_cold_window: int = 40
+    blue_pattern_window: int = 20
+    blue_parity_window: int = 10
+    cycle_max_period: int = 50
+    sum_trend_periods: int = 30
+    zone_balance_periods: int = 20
+    position_analysis_periods: int = 60
+    min_ticket_weight: float = 0.03
+    min_pool_score: float = 0.0001
+    diversity_overlap_threshold: int = 4
+    diversity_max_attempts: int = 4
+    diversity_penalty_factor: float = 0.62
+    blue_repeat_high_rate: float = 0.08
+    blue_repeat_bonus: float = 1.5
+    blue_repeat_penalty: float = 0.8
+    missing_threshold: int = 20
+    missing_bonus: float = 1.15
+    missing_penalty: float = 0.9
+    pos_weight_min: float = 0.6
+    pos_weight_max: float = 1.5
+
+    def to_runtime_config(self) -> Dict:
+        """转换为运行时配置字典"""
+        row_count = len(self.rotation_matrix_rows)
+        return {
+            "pool_params": {
+                "core_red_pool_size": self.core_red_pool_size,
+                "core_blue_pool_size": self.core_blue_pool_size,
+            },
+            "fusion_params": {
+                "ticket_decay_step": self.ticket_decay_step,
+                "min_ticket_decay": self.min_ticket_decay,
+            },
+            "matrix_params": {
+                "matrix_type": self.rotation_matrix_type,
+                "preferred_rows": list(range(1, row_count + 1)),
+                "row_weights": {str(i): 1.0 / row_count for i in range(1, row_count + 1)},
+            },
+        }
+
+
+CONFIG = PredictionConfig()
+
+DATA_FILE = CONFIG.data_file
+ARCHIVE_DIR = CONFIG.archive_dir
+DRAW_WEEKDAYS = set(CONFIG.draw_weekdays)
+DRAW_CUTOFF_HOUR = CONFIG.draw_cutoff_hour
+DRAW_CUTOFF_MINUTE = CONFIG.draw_cutoff_minute
+TEAM_TICKET_COUNT = CONFIG.team_ticket_count
+CORE_RED_POOL_SIZE = CONFIG.core_red_pool_size
+CORE_BLUE_POOL_SIZE = CONFIG.core_blue_pool_size
+ROTATION_MATRIX_TYPE = CONFIG.rotation_matrix_type
+ROTATION_MATRIX_ROWS = CONFIG.rotation_matrix_rows
+DEFAULT_RUNTIME_CONFIG = CONFIG.to_runtime_config()
 
 
 def load_data():
@@ -568,29 +615,6 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
             candidates.extend(hot_red[:max(0, 6 - len(candidates))])
             candidates = sorted(set(candidates))
         blue_candidates = top_blue_pattern
-    elif strategy == 'sum':
-        # 和值趋势策略
-        sum_analysis = analyze_sum_trend(records)
-        # 根据和值权重选择号码
-        weighted_candidates = sorted(
-            sum_analysis['sum_weights'].items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        candidates = [n for n, w in weighted_candidates[:12]]
-        blue_candidates = list(range(1, 17))
-    elif strategy == 'zone':
-        # 区间平衡策略
-        zone_analysis = analyze_zone_balance(records)
-        # 从各区热号中选择，优先选择需要补充的区
-        candidates = []
-        for zone in [1, 2, 3]:
-            zone_hot = zone_analysis['zone_hot'][zone]
-            # 根据该区需要的数量选择
-            need = zone_analysis['target_zones'][zone]
-            candidates.extend(zone_hot[:need + 1])
-        candidates = list(set(candidates))
-        blue_candidates = list(range(1, 17))
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
     
@@ -881,14 +905,20 @@ def _ticket_score(red: List[int], blue: int, actual: Dict) -> float:
 
 def train_lead_agent(
     records: List[Dict],
-    learning_cycles: int = 24,
-    learning_rate: float = 0.15,
+    learning_cycles: int = None,
+    learning_rate: float = None,
     window_sizes: Optional[Tuple[int, ...]] = None,
     window_weights: Optional[Tuple[float, ...]] = None,
-    decay_gamma: float = 0.88,  # 微调：降低增强近期权重，应对冷号回补现象
+    decay_gamma: float = None,
     initial_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """主Agent差异学习：多窗口回测 + 时间衰减动态赋权。"""
+    if learning_cycles is None:
+        learning_cycles = CONFIG.default_learn_cycles
+    if learning_rate is None:
+        learning_rate = CONFIG.learning_rate
+    if decay_gamma is None:
+        decay_gamma = CONFIG.decay_gamma
     if window_sizes is None:
         window_sizes = (learning_cycles, learning_cycles * 2, learning_cycles * 4)
     valid_windows = tuple(sorted({max(8, int(w)) for w in window_sizes}))
@@ -901,7 +931,7 @@ def train_lead_agent(
     normalized_window_weights = _normalize_weights(raw_weights)
     initial_normalized = _normalize_agent_weights(initial_weights or {})
     if initial_weights:
-        prior_weights = {agent: max(0.05, initial_normalized[agent] * len(AGENT_TEAMS)) for agent in AGENT_TEAMS}
+        prior_weights = {agent: max(CONFIG.min_ticket_weight, initial_normalized[agent] * len(AGENT_TEAMS)) for agent in AGENT_TEAMS}
     else:
         prior_weights = {agent: 1.0 for agent in AGENT_TEAMS}
     weights = dict(prior_weights)
@@ -1348,6 +1378,35 @@ def build_core_pool_snapshot(
     }
 
 
+def _select_blue_ball_for_row(
+    row_id: int,
+    blue_pool: List[int],
+    blue_scores: Dict[int, float],
+    used_blues: Set[int],
+    rng: random.Random
+) -> int:
+    """为特定行选择蓝球，优先选择未使用的得分较高的蓝球"""
+    if not blue_pool:
+        return 1
+    
+    candidates = []
+    for b in blue_pool:
+        score = blue_scores.get(b, 0.5)
+        candidates.append((b, score))
+    
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    
+    unused_candidates = [(b, s) for b, s in candidates if b not in used_blues]
+    
+    if unused_candidates:
+        if len(unused_candidates) >= 2:
+            top2 = [b for b, _ in unused_candidates[:2]]
+            return rng.choice(top2)
+        return unused_candidates[0][0]
+    
+    return candidates[0][0]
+
+
 def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config: Optional[Dict[str, object]] = None) -> List[Dict[str, object]]:
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
@@ -1358,7 +1417,8 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
     row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= len(ROTATION_MATRIX_ROWS)]
 
     red_pool = list(snapshot.get("red_pool", []))[:core_red_pool_size]
-    blue_pool = list(snapshot.get("blue_pool", [])) or [1]
+    blue_pool = list(snapshot.get("blue_pool", [])) or list(range(1, 17))
+    blue_scores = snapshot.get("blue_scores", {}) or {b: 1.0 for b in blue_pool}
     pool_sources = snapshot.get("pool_sources", {}) or {}
     blue_sources = snapshot.get("blue_sources", {}) or {}
     red_agent_contrib = snapshot.get("red_agent_contrib", {}) or {}
@@ -1368,10 +1428,13 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
         return []
 
     tickets: List[Dict[str, object]] = []
+    used_blues: Set[int] = set()
+    rng = random.Random()
+    
     for row_id in row_order:
         row = ROTATION_MATRIX_ROWS[row_id - 1]
         final_red = sorted(red_pool[index] for index in row)
-        final_blue = int(blue_pool[(row_id - 1) % len(blue_pool)])
+        final_blue = _select_blue_ball_for_row(row_id, blue_pool, blue_scores, used_blues, rng)
         source_agents = set()
         red_contrib_json = []
         red_contrib_parts = []
@@ -1454,15 +1517,21 @@ def generate_team_matrix_tickets(
     snapshot = build_core_pool_snapshot(
         teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config, pos_weights=pos_w
     )
-    # 蓝球模式加权重排：用全局蓝球模式分析修正聚合结果
     if records and len(records) >= 5:
         bp = analyze_blue_patterns(records)
         bp_scores = bp['blue_scores']
         blue_pool = list(snapshot.get('blue_pool', []))
         if blue_pool:
-            reranked = sorted(blue_pool, key=lambda b: bp_scores.get(b, 0.5), reverse=True)
-            snapshot['blue_pool'] = reranked
-            snapshot['blue_scores'] = {b: round(float(bp_scores.get(b, 0.5)), 6) for b in reranked}
+            all_blue_scores = {}
+            for b in range(1, 17):
+                agent_score = snapshot.get('blue_scores', {}).get(b, 0.0)
+                pattern_score = bp_scores.get(b, 1.0)
+                all_blue_scores[b] = agent_score * pattern_score
+            
+            extended_pool = sorted(all_blue_scores.items(), key=lambda x: x[1], reverse=True)
+            extended_pool = [b for b, _ in extended_pool[:8]]
+            snapshot['blue_pool'] = extended_pool
+            snapshot['blue_scores'] = {b: round(float(all_blue_scores.get(b, 1.0)), 6) for b in extended_pool}
     return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
 
 
