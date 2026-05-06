@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 DATA_FILE = GLOBAL_CONFIG.data_file
 
+DATA_FILE = "lottery_data.json"
+
 
 def _is_valid_agent(agent: object) -> bool:
     return str(agent) in VALID_AGENTS
