@@ -19,34 +19,34 @@ class ProjectConfig:
     draw_cutoff_minute: int = 30
     
     team_ticket_count: int = 5
-    core_red_pool_size: int = 10
-    core_blue_pool_size: int = 3
-    rotation_matrix_type: str = "10_red_guard_6_to_5"
+    core_red_pool_size: int = 14
+    core_blue_pool_size: int = 6
+    rotation_matrix_type: str = "14_red_guard_6_to_5"
     rotation_matrix_rows: Tuple[Tuple[int, ...], ...] = field(
         default_factory=lambda: (
             (0, 1, 2, 3, 4, 5),
-            (0, 1, 2, 6, 7, 8),
-            (0, 3, 4, 6, 7, 9),
-            (1, 3, 5, 6, 8, 9),
-            (2, 4, 5, 7, 8, 9),
+            (0, 1, 6, 7, 8, 9),
+            (0, 2, 6, 10, 11, 12),
+            (1, 3, 7, 10, 11, 13),
+            (2, 4, 5, 8, 9, 12),
         )
     )
     
-    ticket_decay_step: float = 0.08
-    min_ticket_decay: float = 0.65
-    learning_rate: float = 0.15
-    decay_gamma: float = 0.88
-    default_learn_cycles: int = 24
-    
-    hot_cold_window: int = 40
-    blue_pattern_window: int = 20
-    blue_parity_window: int = 10
-    cycle_max_period: int = 50
-    sum_trend_periods: int = 30
-    zone_balance_periods: int = 20
+    ticket_decay_step: float = 0.06
+    min_ticket_decay: float = 0.55
+    learning_rate: float = 0.25
+    decay_gamma: float = 0.85
+    default_learn_cycles: int = 30
+
+    hot_cold_window: int = 50
+    blue_pattern_window: int = 30
+    blue_parity_window: int = 15
+    cycle_max_period: int = 60
+    sum_trend_periods: int = 40
+    zone_balance_periods: int = 30
     position_analysis_periods: int = 60
-    
-    min_ticket_weight: float = 0.03
+
+    min_ticket_weight: float = 0.02
     min_pool_score: float = 0.0001
     diversity_overlap_threshold: int = 4
     diversity_max_attempts: int = 4

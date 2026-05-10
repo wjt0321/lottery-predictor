@@ -15,6 +15,7 @@ import math
 
 from agent_registry import AGENT_TEAMS
 from project_config import GLOBAL_CONFIG
+from blue_ball_engine import BlueBallEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -490,11 +491,11 @@ def _safe_red_sample(
 
 
 def generate_prediction(records, strategy='balanced', rng: random.Random = None, use_enhanced=False):
-    """按单策略生成预测号码 - 优化：增加蓝球遗漏分析和趋势权重，支持增强分析。"""
+    """按单策略生成预测号码 - V2: 集成独立蓝球引擎。"""
     rng = rng or random.Random()
     if not records:
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
-    
+
     analysis = {
         'hot_cold': analyze_hot_cold(records),
         'missing': analyze_missing(records),
@@ -502,114 +503,108 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
         'trend': analyze_trend(records),
         'blue_pattern': analyze_blue_patterns(records),
     }
-    
+
     hot_red = analysis['hot_cold']['hot_red']
     cold_red = analysis['hot_cold']['cold_red']
     high_missing = analysis['missing']['high_missing_red']
-    hot_blue = analysis['hot_cold']['hot_blue']
-    cold_blue = analysis['hot_cold']['cold_blue']
-    high_missing_blue = analysis['blue_missing']['high_missing_blue']
     blue_pattern_scores = analysis['blue_pattern']['blue_scores']
-    
-    # 蓝球加权候选池（从模式分析取Top5）
-    weighted_blue_pool = sorted(
-        blue_pattern_scores.items(), key=lambda x: x[1], reverse=True
-    )
-    top_blue_pattern = [n for n, s in weighted_blue_pool[:5]]
-    
+
+    # 使用独立蓝球引擎获取蓝球候选池
+    if len(records) >= 20:
+        blue_engine = BlueBallEngine(records)
+        blue_result = blue_engine.predict(pool_size=8)
+        blue_candidates = blue_result['pool']
+    else:
+        top_blue_pattern = [n for n, s in sorted(
+            blue_pattern_scores.items(), key=lambda x: x[1], reverse=True
+        )[:5]]
+        blue_candidates = top_blue_pattern
+
     if strategy == 'hot':
         candidates = hot_red
-        blue_candidates = sorted(set(hot_blue[:3] + top_blue_pattern[:3]))
     elif strategy == 'cold':
         candidates = cold_red
-        blue_candidates = sorted(set(cold_blue[:3] + high_missing_blue[:3]))
     elif strategy == 'missing':
         candidates = high_missing
-        blue_candidates = sorted(set(high_missing_blue[:3] + top_blue_pattern[:3]))
     elif strategy == 'balanced':
-        candidates = list(set(hot_red[:4] + cold_red[:4] + high_missing[:4]))
-        blue_candidates = sorted(set(hot_blue[:3] + high_missing_blue[:3] + top_blue_pattern[:2]))
+        candidates = list(set(hot_red[:5] + cold_red[:5] + high_missing[:5]))
     elif strategy == 'cycle':
         cycle_analysis = analyze_cycle(records)
-        candidates = cycle_analysis['top_cycle'][:10]
+        candidates = cycle_analysis['top_cycle'][:12]
         if not candidates:
             candidates = hot_red[:5] + high_missing[:5]
-        blue_candidates = top_blue_pattern
     elif strategy == 'sum':
         sum_analysis = analyze_sum_trend(records)
         weighted_candidates = sorted(
             sum_analysis['sum_weights'].items(),
-            key=lambda x: x[1],
-            reverse=True
+            key=lambda x: x[1], reverse=True
         )
-        candidates = [n for n, w in weighted_candidates[:12]]
+        candidates = [n for n, w in weighted_candidates[:14]]
         if not candidates:
             candidates = hot_red[:5] + high_missing[:5]
-        blue_candidates = top_blue_pattern
     elif strategy == 'zone':
         zone_analysis = analyze_zone_balance(records)
         candidates = []
         for zone in [1, 2, 3]:
             zone_hot = zone_analysis['zone_hot'][zone]
             need = zone_analysis['target_zones'][zone]
-            candidates.extend(zone_hot[:need + 1])
+            candidates.extend(zone_hot[:need + 2])
         candidates = list(set(candidates))
-        if len(candidates) < 6:
-            candidates.extend(hot_red[:max(0, 6 - len(candidates))])
+        if len(candidates) < 10:
+            candidates.extend(hot_red[:max(0, 10 - len(candidates))])
             candidates = sorted(set(candidates))
-        blue_candidates = top_blue_pattern
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
-    
+
     # 应用增强分析权重（如果启用且可用）
     if use_enhanced and ENHANCED_AVAILABLE and calculate_enhanced_weights:
         try:
             enhanced = calculate_enhanced_weights(records)
-            
-            # 应用红球权重
             red_weights = enhanced['red_weights']
             weighted_candidates = []
             for num in candidates:
                 weight = red_weights.get(num, 1.0)
                 weighted_candidates.append((num, weight))
-            
-            # 按权重排序并选择Top12
             weighted_candidates.sort(key=lambda x: x[1], reverse=True)
-            candidates = [num for num, _ in weighted_candidates[:12]]
-            
-            # 应用蓝球权重
-            blue_weights = enhanced['blue_weights']
-            weighted_blue = []
-            for num in blue_candidates:
-                weight = blue_weights.get(num, 1.0)
-                weighted_blue.append((num, weight))
-            
-            weighted_blue.sort(key=lambda x: x[1], reverse=True)
-            blue_candidates = [num for num, _ in weighted_blue[:5]]
+            candidates = [num for num, _ in weighted_candidates[:14]]
         except Exception:
-            # 增强分析失败时回退到原始逻辑
             pass
 
     red_balls = _safe_red_sample(rng, candidates, required=6)
-    
-    # 蓝球选择优化：按模式得分加权采样，不再均匀随机
-    if blue_candidates:
-        bc_weights = [blue_pattern_scores.get(b, 0.5) for b in blue_candidates]
+
+    # 蓝球：用引擎得分加权采样
+    if len(records) >= 20 and blue_candidates:
+        engine_scores = blue_result['scores']
+        bc_weights = [engine_scores.get(b, 0.5) for b in blue_candidates]
         total_w = sum(bc_weights)
         if total_w > 0:
-            r = rng.random() * total_w
+            r_val = rng.random() * total_w
             acc = 0.0
             blue_ball = blue_candidates[-1]
             for b, w in zip(blue_candidates, bc_weights):
                 acc += w
-                if acc >= r:
+                if acc >= r_val:
                     blue_ball = b
                     break
         else:
-            blue_ball = rng.choice(blue_candidates)
+            blue_ball = rng.choice(blue_candidates) if blue_candidates else rng.randint(1, 16)
+    elif blue_candidates:
+        bc_weights = [blue_pattern_scores.get(b, 0.5) for b in blue_candidates]
+        total_w = sum(bc_weights)
+        if total_w > 0:
+            r_val = rng.random() * total_w
+            acc = 0.0
+            blue_ball = blue_candidates[-1]
+            for b, w in zip(blue_candidates, bc_weights):
+                acc += w
+                if acc >= r_val:
+                    blue_ball = b
+                    break
+        else:
+            blue_ball = rng.choice(blue_candidates) if blue_candidates else rng.randint(1, 16)
     else:
         blue_ball = rng.randint(1, 16)
-    
+
     return red_balls, blue_ball
 
 
@@ -1266,12 +1261,18 @@ def build_core_pool_snapshot(
     blue_sources: Dict[int, Set[str]] = defaultdict(set)
     valid_agents: List[str] = []
 
+    # Anti-dominance: cap max agent weight to prevent single-agent takeover
+    n_agents = len(AGENT_TEAMS)
+    max_agent_weight = 2.0 / n_agents  # cap at 2x uniform weight
+
     for agent, payload in teams.items():
         proposals = payload.get("proposals", [])
         if not proposals:
             continue
         valid_agents.append(agent)
         base_weight = lead_model["weights"].get(agent, 0.0) * diff_factor
+        # Apply anti-dominance cap
+        base_weight = min(base_weight, max_agent_weight)
         diff_bonus = max(0.0, lead_model["diff_scores"].get(agent, 0.0)) * 0.2
         final_weight = base_weight * (1 + diff_bonus)
         for proposal_index, proposal in enumerate(proposals):
@@ -1286,6 +1287,12 @@ def build_core_pool_snapshot(
             blue_sources[blue].add(agent)
             blue_agent_contrib[blue][agent] = blue_agent_contrib[blue].get(agent, 0.0) + weighted_score
 
+    # Cross-agent diversity bonus: reward balls selected by multiple distinct agents
+    for ball in range(1, 34):
+        agent_count = len(pool_sources.get(ball, set()))
+        if agent_count >= 3:
+            red_scores[ball] *= 1.0 + min(0.3, (agent_count - 2) * 0.1)
+
     # 位置加权：根据各号码在6个位置的历史出现频率调整得分
     if pos_weights:
         for ball in range(1, 34):
@@ -1299,6 +1306,7 @@ def build_core_pool_snapshot(
     red_pool = [ball for ball, score in ranked_red if score > 0][:core_red_pool_size]
     blue_pool = [ball for ball, score in ranked_blue if score > 0][:core_blue_pool_size]
 
+    # Ensure pool reaches target size
     if len(red_pool) < core_red_pool_size:
         for ball, _ in ranked_red:
             if ball not in red_pool:
@@ -1307,6 +1315,13 @@ def build_core_pool_snapshot(
                 break
     if not blue_pool:
         blue_pool = [ball for ball, _ in ranked_blue[:1]] or [1]
+    # Blue pool minimum diversity: ensure at least 4 blues if we have data
+    if len(blue_pool) < max(4, core_blue_pool_size):
+        for ball, _ in ranked_blue:
+            if ball not in blue_pool:
+                blue_pool.append(ball)
+            if len(blue_pool) >= max(4, core_blue_pool_size):
+                break
 
     return {
         "red_pool": red_pool,
@@ -1318,6 +1333,7 @@ def build_core_pool_snapshot(
         "red_agent_contrib": red_agent_contrib,
         "blue_agent_contrib": blue_agent_contrib,
         "valid_agents": sorted(valid_agents),
+        "agent_count_map": {ball: len(pool_sources.get(ball, set())) for ball in red_pool},
     }
 
 
@@ -1355,9 +1371,24 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
     core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
     matrix_type = str(runtime.get("matrix_params", {}).get("matrix_type", ROTATION_MATRIX_TYPE))
     preferred_rows = runtime.get("matrix_params", {}).get("preferred_rows", []) or []
+
+    # Select rotation matrix based on type
+    MATRIX_REGISTRY = {
+        "10_red_guard_6_to_5": (
+            (0, 1, 2, 3, 4, 5),
+            (0, 1, 2, 6, 7, 8),
+            (0, 3, 4, 6, 7, 9),
+            (1, 3, 5, 6, 8, 9),
+            (2, 4, 5, 7, 8, 9),
+        ),
+        "14_red_guard_6_to_5": GLOBAL_CONFIG.rotation_matrix_rows,
+    }
+    active_matrix = MATRIX_REGISTRY.get(matrix_type, GLOBAL_CONFIG.rotation_matrix_rows)
+    matrix_row_count = len(active_matrix)
+
     if not preferred_rows:
-        preferred_rows = [1, 2, 3, 4, 5]
-    row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= len(ROTATION_MATRIX_ROWS)]
+        preferred_rows = list(range(1, matrix_row_count + 1))
+    row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= matrix_row_count]
 
     red_pool = list(snapshot.get("red_pool", []))[:core_red_pool_size]
     blue_pool = list(snapshot.get("blue_pool", [])) or list(range(1, 17))
@@ -1373,9 +1404,12 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
     tickets: List[Dict[str, object]] = []
     used_blues: Set[int] = set()
     rng = random.Random()
-    
+
     for row_id in row_order:
-        row = ROTATION_MATRIX_ROWS[row_id - 1]
+        row = active_matrix[row_id - 1]
+        # Validate row indices against pool
+        if max(row) >= len(red_pool):
+            continue
         final_red = sorted(red_pool[index] for index in row)
         final_blue = _select_blue_ball_for_row(row_id, blue_pool, blue_scores, used_blues, rng)
         source_agents = set()
@@ -1460,7 +1494,45 @@ def generate_team_matrix_tickets(
     snapshot = build_core_pool_snapshot(
         teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config, pos_weights=pos_w
     )
-    if records and len(records) >= 5:
+
+    # --- 独立蓝球引擎介入 ---
+    if records and len(records) >= 20:
+        runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+        core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
+
+        # 运行独立蓝球引擎
+        blue_engine = BlueBallEngine(records)
+        blue_result = blue_engine.predict(pool_size=max(core_blue_pool_size, 6))
+
+        # 合并 Agent 提案分 + 蓝球引擎分
+        agent_blue_scores = snapshot.get('blue_scores', {}) or {}
+        combined_blue = {}
+        for b in range(1, 17):
+            engine_score = blue_result['scores'].get(b, 1.0)
+            agent_score = agent_blue_scores.get(b, 0.0)
+            # 70% 引擎 + 30% Agent 提案融合
+            combined_blue[b] = engine_score * 0.7 + (agent_score / max(0.001, max(agent_blue_scores.values()) or 1.0)) * 0.3
+
+        # 冷号强制纳入
+        cold_chase_nums = [num for num, _ in blue_result.get('cold_chase', [])]
+        combined_pool = sorted(combined_blue.items(), key=lambda x: x[1], reverse=True)
+        blue_pool = [b for b, _ in combined_pool[:core_blue_pool_size]]
+
+        # 强制加回冷号
+        for cold_num in cold_chase_nums:
+            if cold_num not in blue_pool and len(blue_pool) < core_blue_pool_size + 1:
+                blue_pool.append(cold_num)
+        blue_pool = blue_pool[:max(core_blue_pool_size, len(blue_pool))]
+
+        snapshot['blue_pool'] = blue_pool
+        snapshot['blue_scores'] = {b: round(float(combined_blue.get(b, 1.0)), 6) for b in blue_pool}
+        snapshot['blue_engine_details'] = {
+            'engine_pool': blue_result['pool'],
+            'cold_chase': blue_result.get('cold_chase', []),
+            'next_odd_prob': blue_result['details']['next_odd_prob'],
+        }
+    elif records and len(records) >= 5:
+        # Fallback: old pattern-based approach for small datasets
         bp = analyze_blue_patterns(records)
         bp_scores = bp['blue_scores']
         blue_pool = list(snapshot.get('blue_pool', []))
@@ -1470,11 +1542,14 @@ def generate_team_matrix_tickets(
                 agent_score = snapshot.get('blue_scores', {}).get(b, 0.0)
                 pattern_score = bp_scores.get(b, 1.0)
                 all_blue_scores[b] = agent_score * pattern_score
-            
+
+            runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+            core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
             extended_pool = sorted(all_blue_scores.items(), key=lambda x: x[1], reverse=True)
-            extended_pool = [b for b, _ in extended_pool[:8]]
+            extended_pool = [b for b, _ in extended_pool[:max(core_blue_pool_size, 8)]]
             snapshot['blue_pool'] = extended_pool
             snapshot['blue_scores'] = {b: round(float(all_blue_scores.get(b, 1.0)), 6) for b in extended_pool}
+
     return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
 
 
@@ -1836,10 +1911,12 @@ def main():
         target_period = next_target_period(records)
         next_date = next_draw_date_str(records)
         print(f"📅 预测期号: {target_period} | 预计开奖: {next_date}")
+        print(f"📐 红球核心池: {CORE_RED_POOL_SIZE}球 | 蓝球核心池: {CORE_BLUE_POOL_SIZE}球 | 旋转矩阵: {ROTATION_MATRIX_TYPE}")
         final_tickets = generate_team_matrix_tickets(
             expert_teams,
             lead_model=lead_model,
             diff_factor=diff_factor,
+            records=records,
             runtime_config=runtime_config,
         )
         if not final_tickets:
@@ -1875,6 +1952,15 @@ def main():
                     "explain": explain,
                     "explain_json": explain_json,
                 })
+        # Show pooled diagnostic info
+        if records and len(records) >= 20:
+            blue_engine = BlueBallEngine(records)
+            blue_diag = blue_engine.predict(pool_size=6)
+            cold_chase_str = ", ".join(f"{n:02d}(缺{m}期)" for n, m in blue_diag.get('cold_chase', []))
+            if cold_chase_str:
+                print(f"  🔵 蓝球追冷目标: {cold_chase_str}")
+            engine_pool_str = " ".join(f"{n:02d}" for n in blue_diag['pool'])
+            print(f"  🔵 蓝球引擎候选池: {engine_pool_str}")
         for i, final_ticket in enumerate(final_tickets):
             red, blue = final_ticket["red"], final_ticket["blue"]
             sources = final_ticket["sources"]
