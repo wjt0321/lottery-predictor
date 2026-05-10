@@ -19,8 +19,8 @@ class ProjectConfig:
     draw_cutoff_minute: int = 30
     
     team_ticket_count: int = 5
-    core_red_pool_size: int = 10
-    core_blue_pool_size: int = 3
+    core_red_pool_size: int = 12
+    core_blue_pool_size: int = 6
     rotation_matrix_type: str = "10_red_guard_6_to_5"
     rotation_matrix_rows: Tuple[Tuple[int, ...], ...] = field(
         default_factory=lambda: (
