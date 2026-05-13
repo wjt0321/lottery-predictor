@@ -35,6 +35,7 @@
   - 专家负责发现高价值号码池
   - 旋转矩阵负责尽量保留号码池价值，避免拆票阶段随机稀释
 - 当前 `team` 模式固定输出 `5` 注 `6+1`，不要在未明确讨论的情况下改回可变注数。
+- **位置权重**：矩阵每行独立应用历史位置表现，而非全局一次性应用
 
 ### 学习闭环
 
@@ -70,6 +71,26 @@
 
 - `lstm_predictor.py` 与 TensorFlow 依赖已从主链路移除。
 - 不要重新引入 `lstm` 专家，除非用户明确要求恢复并接受依赖成本。
+
+## V3 迭代 (2026-05-13)
+
+本次迭代完成了 [ITERATION_PLAN.md](file:///workspace/ITERATION_PLAN.md) 中的所有任务：
+
+### 修改内容
+1. **1.1 加权采样** ([_safe_red_sample](file:///workspace/predict.py#L482-L504))：红球候选池排名靠前的号码获得更高入选概率（exp(-rank * 0.3)）
+2. **1.2 权重修复** ([build_weight_adjustments](file:///workspace/analyze_archive.py#L327-L361))：强制 weight_deltas 总和为 0，避免全为负数
+3. **2.1 位置权重矩阵** ([generate_rotation_matrix_tickets](file:///workspace/predict.py#L1430-L1444))：矩阵每行独立按历史位置表现调整排序
+4. **2.2 蓝球归一化** ([predict](file:///workspace/blue_ball_engine.py#L310-L317))：从 [0.5, 1.5] 放宽到 [0.1, 3.0]，区分度扩大 2.9 倍
+5. **2.3 冷号软加权** ([predict](file:///workspace/blue_ball_engine.py#L323-L342))：冷号自然参与排序，最多 1 个 bonus
+6. **3.1 多样性约束** ([generate_rotation_matrix_tickets](file:///workspace/predict.py#L1458-L1481))：重叠 ≥4 个红球时自动交换低共识号码
+7. **3.2 统一蓝球路径** ([generate_team_matrix_tickets](file:///workspace/predict.py#L1527-L1556))：蓝球完全由 BlueBallEngine 决定，删除 Agent 蓝球融合
+8. **4.1 删除冗余** ([predict.py](file:///workspace/predict.py))：移除 analyze_blue_patterns，蓝球分析统一走 BlueBallEngine
+
+### 测试验证
+- 43/44 unittest 通过（唯一失败是 test_update_data 因缺少 requests 模块）
+- 蓝球区分度验证：分值范围 [0.1, 3.0]
+- 加权采样验证：排名靠前的号码出现频率是排名靠后的 3-4 倍
+- 权重修复验证：weight_deltas 现在有正有负（如 cold +0.0058, zone -0.0110）
 
 ## 推荐工作流
 
