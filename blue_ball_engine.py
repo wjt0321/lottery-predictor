@@ -307,13 +307,13 @@ class BlueBallEngine:
         # 贝叶斯更新
         final_scores = self.bayesian_update(raw_scores)
 
-        # 归一化
+        # 归一化到 [0.1, 3.0] 以保留更大区分度
         min_s = min(final_scores.values())
         max_s = max(final_scores.values())
         span = max_s - min_s
         if span > 0.01:
             for num in final_scores:
-                final_scores[num] = 0.5 + (final_scores[num] - min_s) / span * 1.0
+                final_scores[num] = 0.1 + (final_scores[num] - min_s) / span * 2.9
 
         # 排序选池
         ranked = sorted(final_scores.items(), key=lambda x: x[1], reverse=True)
@@ -325,20 +325,24 @@ class BlueBallEngine:
              if miss >= self.missing_cold_threshold],
             key=lambda x: x[1], reverse=True
         )[:self.cold_chase_cap]
-        # 强制纳入追冷号（如果它们在候选池之外）
+
+        # 软加权：冷号通过遗漏维度分数自然参与排序
+        # 如果冷号分数足够高就能自然进入前 N，不再强制替换
+        # 仅当冷号确实在 pool 外且分数接近阈值时，给予微小 bonus
+        cold_bonus_applied = 0
         for num, _ in cold_chase:
-            if num not in pool and len(pool) >= pool_size:
-                pool[-1] = num  # 替换最后一个
-            elif num not in pool:
-                pool.append(num)
-        pool = list(set(pool))  # 去重
-        if len(pool) < pool_size:
-            # 补充
-            for num, _ in ranked:
-                if num not in pool:
-                    pool.append(num)
-                if len(pool) >= pool_size:
-                    break
+            if num not in pool and cold_bonus_applied < 1:
+                # 给冷号分数一个微小提升后重新排序，最多只纳入 1 个
+                boosted_scores = dict(final_scores)
+                boosted_scores[num] *= 1.15
+                re_ranked = sorted(boosted_scores.items(), key=lambda x: x[1], reverse=True)
+                new_pool = [n for n, _ in re_ranked[:pool_size]]
+                if num in new_pool:
+                    pool = new_pool
+                    cold_bonus_applied += 1
+
+        pool = list(set(pool))
+        pool.sort(key=lambda n: final_scores.get(n, 0), reverse=True)
         pool = pool[:pool_size]
 
         return {

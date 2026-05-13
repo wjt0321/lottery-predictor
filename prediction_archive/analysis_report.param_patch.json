@@ -3,7 +3,7 @@
   "origin": "analyze_archive",
   "pool_params": {
     "core_red_pool_size": 10,
-    "core_blue_pool_size": 3
+    "core_blue_pool_size": 4
   },
   "fusion_params": {
     "ticket_decay_step": 0.08,
@@ -14,9 +14,9 @@
     "matrix_type": "10_red_guard_6_to_5",
     "preferred_rows": [
       1,
-      3,
       5,
       2,
+      3,
       4
     ]
   }
