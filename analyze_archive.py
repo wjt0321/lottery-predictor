@@ -348,6 +348,14 @@ def build_weight_adjustments(
                 "weight_delta": round(adjust, 4),
             }
         )
+
+    # 强制 weight_deltas 总和为 0，避免系统性偏差导致全部为负
+    total_delta = sum(r["weight_delta"] for r in recommendations)
+    if recommendations:
+        avg_delta = total_delta / len(recommendations)
+        for r in recommendations:
+            r["weight_delta"] = round(r["weight_delta"] - avg_delta, 4)
+
     recommendations.sort(key=lambda r: r["weight_delta"], reverse=True)
     return recommendations
 
