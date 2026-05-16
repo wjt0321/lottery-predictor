@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from unittest import mock
 
 import predict
 
@@ -534,6 +535,240 @@ class PredictFlowTests(unittest.TestCase):
             self.assertEqual(runtime["pool_params"]["core_blue_pool_size"], 4)
             self.assertEqual(runtime["matrix_params"]["preferred_rows"], [5, 3, 1, 2, 4])
             self.assertEqual(runtime["matrix_params"]["row_weights"]["5"], 0.6)
+
+    def test_default_runtime_config_includes_blue_params(self):
+        runtime = predict.resolve_runtime_config()
+        self.assertIn("blue_params", runtime)
+        self.assertEqual(
+            runtime["blue_params"]["missing_cold_threshold"],
+            predict.CONFIG.blue_missing_cold_threshold,
+        )
+        self.assertEqual(
+            runtime["blue_params"]["cold_chase_cap"],
+            predict.CONFIG.blue_cold_chase_cap,
+        )
+
+    def test_load_param_patch_can_override_blue_params(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            patch_path = os.path.join(temp_dir, "param_patch.latest.json")
+            payload = {
+                "blue_params": {
+                    "missing_cold_threshold": 9,
+                    "cold_chase_cap": 2,
+                }
+            }
+            with open(patch_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            loaded = predict.load_param_patch(patch_path)
+            self.assertEqual(loaded["blue_params"]["missing_cold_threshold"], 9)
+            self.assertEqual(loaded["blue_params"]["cold_chase_cap"], 2)
+
+    def test_generate_team_matrix_tickets_passes_blue_params_to_engine(self):
+        teams = {
+            "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}], "error": ""},
+            "cold": {"proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 2}], "error": ""},
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+        records = self._build_mock_records(40)
+        captured = {}
+
+        class FakeBlueBallEngine:
+            def __init__(self, _records, config=None):
+                captured["config"] = config
+
+            def predict(self, pool_size=6):
+                _ = pool_size
+                return {
+                    "pool": [1, 2, 3, 4, 5, 6],
+                    "scores": {i: 2.0 - i * 0.1 for i in range(1, 17)},
+                    "details": {"next_odd_prob": 0.5},
+                    "cold_chase": [],
+                }
+
+        runtime_config = predict.resolve_runtime_config()
+        runtime_config["blue_params"]["missing_cold_threshold"] = 9
+
+        with mock.patch.object(predict, "BlueBallEngine", FakeBlueBallEngine):
+            predict.generate_team_matrix_tickets(
+                teams,
+                lead_model,
+                diff_factor=1.0,
+                records=records,
+                runtime_config=runtime_config,
+            )
+
+        self.assertEqual(captured["config"]["missing_cold_threshold"], 9)
+
+    def test_generate_rotation_matrix_tickets_tracks_used_blues(self):
+        snapshot = {
+            "red_pool": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "blue_pool": [1, 2, 3, 4, 5, 6],
+            "red_scores": {n: 1.0 for n in range(1, 11)},
+            "blue_scores": {n: 2.0 - n * 0.1 for n in range(1, 7)},
+            "pool_sources": {n: ["hot"] for n in range(1, 11)},
+            "blue_sources": {n: ["hot"] for n in range(1, 7)},
+            "red_agent_contrib": {n: {"hot": 1.0} for n in range(1, 11)},
+            "blue_agent_contrib": {n: {"hot": 1.0} for n in range(1, 7)},
+            "valid_agents": ["hot"],
+        }
+        runtime_config = {
+            "pool_params": {"core_red_pool_size": 10, "core_blue_pool_size": 6},
+            "matrix_params": {"matrix_type": "10_red_guard_6_to_5", "preferred_rows": [1, 2, 3, 4, 5]},
+        }
+
+        class FakeRandom:
+            def choice(self, seq):
+                return seq[0]
+
+        with mock.patch.object(predict.random, "Random", return_value=FakeRandom()):
+            tickets = predict.generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
+
+        blues = [ticket["blue"] for ticket in tickets]
+        self.assertEqual(blues, [1, 2, 3, 4, 5])
+
+    def test_generate_rotation_matrix_tickets_uses_row_weights_when_preferred_rows_missing(self):
+        snapshot = {
+            "red_pool": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            "blue_pool": [3, 5],
+            "red_scores": {n: 1.0 for n in range(1, 11)},
+            "blue_scores": {3: 1.0, 5: 0.8},
+            "pool_sources": {n: ["hot", "balanced"] for n in range(1, 11)},
+            "blue_sources": {3: ["hot"], 5: ["balanced"]},
+            "red_agent_contrib": {n: {"hot": 1.0} for n in range(1, 11)},
+            "blue_agent_contrib": {3: {"hot": 1.0}, 5: {"balanced": 0.8}},
+            "valid_agents": ["hot", "balanced"],
+        }
+        runtime_config = {
+            "pool_params": {"core_red_pool_size": 10, "core_blue_pool_size": 2},
+            "fusion_params": {"ticket_decay_step": 0.08, "min_ticket_decay": 0.65},
+            "matrix_params": {
+                "matrix_type": "10_red_guard_6_to_5",
+                "preferred_rows": [],
+                "row_weights": {"5": 0.9, "3": 0.4, "1": 0.2, "2": 0.1, "4": 0.05},
+            },
+        }
+        tickets = predict.generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
+        self.assertEqual([ticket["matrix_row_id"] for ticket in tickets], [5, 3, 1, 2, 4])
+
+    def test_build_core_pool_snapshot_applies_position_weights_before_matrix(self):
+        teams = {
+            "hot": {
+                "proposals": [
+                    {"red": [1, 2, 3, 4, 5, 9], "blue": 1},
+                    {"red": [1, 6, 7, 8, 9, 10], "blue": 2},
+                ],
+                "error": "",
+            },
+            "cold": {
+                "proposals": [
+                    {"red": [1, 11, 12, 13, 14, 9], "blue": 3},
+                    {"red": [1, 15, 16, 17, 18, 9], "blue": 4},
+                ],
+                "error": "",
+            },
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+        pos_weights = [{n: 0.5 for n in range(1, 34)} for _ in range(6)]
+        for pos_map in pos_weights:
+            pos_map[1] = 0.2
+            pos_map[9] = 2.0
+
+        snapshot = predict.build_core_pool_snapshot(
+            teams,
+            lead_model,
+            diff_factor=1.0,
+            runtime_config={"pool_params": {"core_red_pool_size": 6, "core_blue_pool_size": 4}},
+            pos_weights=pos_weights,
+        )
+        self.assertLess(snapshot["red_pool"].index(9), snapshot["red_pool"].index(1))
+
+    def test_team_matrix_backtest_report_has_end_to_end_metrics(self):
+        records = self._build_mock_records(72)
+        report = predict.team_matrix_backtest_report(records, cycles=12, seed=42)
+        self.assertIn("overall", report)
+        self.assertIn("matrix_rows", report)
+        self.assertGreater(report["overall"]["samples"], 0)
+        self.assertIn("avg_ticket_score", report["overall"])
+        self.assertIn("best_of_5_avg_score", report["overall"])
+        self.assertIn("best_of_5_hit_rate_ge2", report["overall"])
+        self.assertIn("blue_pool_hit_rate", report["overall"])
+        self.assertIn("final_blue_hit_rate", report["overall"])
+
+    def test_team_matrix_backtest_report_is_deterministic_with_seed(self):
+        records = self._build_mock_records(72)
+        first = predict.team_matrix_backtest_report(records, cycles=12, seed=42)
+        second = predict.team_matrix_backtest_report(records, cycles=12, seed=42)
+        self.assertEqual(first, second)
+
+    def test_team_matrix_backtest_report_emits_progress_updates(self):
+        records = self._build_mock_records(72)
+        updates = []
+
+        def on_progress(update):
+            updates.append(update)
+
+        report = predict.team_matrix_backtest_report(records, cycles=3, seed=42, progress_callback=on_progress)
+        self.assertEqual(report["overall"]["samples"], 3)
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(updates[0]["current"], 1)
+        self.assertEqual(updates[-1]["total"], 3)
+        self.assertIn("period", updates[0])
+
+    def test_team_matrix_backtest_report_uses_lightweight_lead_training(self):
+        records = self._build_mock_records(72)
+        train_calls = []
+        old_train = predict.train_lead_agent
+        old_build = predict.build_expert_teams
+        old_generate = predict.generate_final_team_tickets
+        try:
+            def fake_train_lead_agent(*args, **kwargs):
+                train_calls.append(kwargs)
+                return {
+                    "weights": {agent: 1 / len(predict.AGENT_TEAMS) for agent in predict.AGENT_TEAMS},
+                    "diff_scores": {agent: 0.0 for agent in predict.AGENT_TEAMS},
+                }
+
+            def fake_build_expert_teams(_history, tickets, seed):
+                _ = seed
+                return {
+                    agent: {
+                        "proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1} for _ in range(tickets)],
+                        "error": "",
+                    }
+                    for agent in predict.AGENT_TEAMS
+                }
+
+            def fake_generate_final_team_tickets(*args, **kwargs):
+                _ = args, kwargs
+                return [
+                    {
+                        "red": [1, 2, 3, 4, 5, 6],
+                        "blue": 1,
+                        "matrix_row_id": row_id,
+                        "explain_json": {"core_pool": {"blue_pool": [1, 2, 3, 4, 5, 6]}},
+                    }
+                    for row_id in range(1, 6)
+                ]
+
+            predict.train_lead_agent = fake_train_lead_agent
+            predict.build_expert_teams = fake_build_expert_teams
+            predict.generate_final_team_tickets = fake_generate_final_team_tickets
+
+            predict.team_matrix_backtest_report(records, cycles=3, seed=42)
+        finally:
+            predict.train_lead_agent = old_train
+            predict.build_expert_teams = old_build
+            predict.generate_final_team_tickets = old_generate
+
+        self.assertEqual(len(train_calls), 3)
+        self.assertEqual(train_calls[0]["num_trials"], 4)
+        self.assertEqual(train_calls[0]["window_sizes"], (8, 24))
 
     def test_build_archive_lead_summary_contains_patch_source(self):
         lead_report = {"healthy_agents": ["hot", "cold"], "archive_summary": "策略风格=保守"}

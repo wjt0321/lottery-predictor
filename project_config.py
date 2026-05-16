@@ -87,6 +87,17 @@ class ProjectConfig:
                 "preferred_rows": list(range(1, row_count + 1)),
                 "row_weights": {str(i): 1.0 / row_count for i in range(1, row_count + 1)},
             },
+            "blue_params": {
+                "missing_cold_threshold": self.blue_missing_cold_threshold,
+                "missing_cold_bonus": self.blue_missing_cold_bonus,
+                "missing_extreme_threshold": self.blue_missing_extreme_threshold,
+                "missing_extreme_bonus": self.blue_missing_extreme_bonus,
+                "parity_window": self.blue_parity_window,
+                "zone_window": self.blue_zone_window,
+                "amplitude_window": self.blue_amplitude_window,
+                "heat_window": self.blue_heat_window,
+                "cold_chase_cap": self.blue_cold_chase_cap,
+            },
         }
 
 

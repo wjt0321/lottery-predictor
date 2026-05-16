@@ -452,34 +452,15 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
     avg_red_pool = max(red_pool_sizes) if red_pool_sizes else 10
     avg_blue_pool = max(blue_pool_sizes) if blue_pool_sizes else 3
 
-    # 动态淘汰：只保留表现达标的矩阵行
-    # 阈值 = 所有行平均分的 80%，低于此值的行被排除
-    if matrix_ranking:
-        avg_row_score = sum(float(r.get("avg_score", 0.0)) for r in matrix_ranking) / len(matrix_ranking)
-        score_threshold = avg_row_score * 0.8
-    else:
-        score_threshold = 0.0
-
     preferred_rows = []
     for row in matrix_ranking:
         try:
             row_id = int(row.get("row_id"))
-            row_score = float(row.get("avg_score", 0.0))
         except Exception:
             continue
-        # 只保留分数高于阈值的行，确保淘汰持续低表现的行
-        if 1 <= row_id <= 5 and row_id not in preferred_rows and row_score >= score_threshold:
+        # 当前补丁语义为动态排序，不做真实淘汰；始终保持 5 注固定输出。
+        if 1 <= row_id <= 5 and row_id not in preferred_rows:
             preferred_rows.append(row_id)
-    # 如果淘汰后剩余行数不足 3，回退到全部行（避免过度淘汰导致出票不足）
-    if len(preferred_rows) < 3:
-        preferred_rows = []
-        for row in matrix_ranking:
-            try:
-                row_id = int(row.get("row_id"))
-            except Exception:
-                continue
-            if 1 <= row_id <= 5 and row_id not in preferred_rows:
-                preferred_rows.append(row_id)
     for row_id in range(1, 6):
         if row_id not in preferred_rows:
             preferred_rows.append(row_id)

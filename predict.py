@@ -430,7 +430,7 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
 
     # 使用独立蓝球引擎获取蓝球候选池
     if len(records) >= 5:
-        blue_engine = BlueBallEngine(records)
+        blue_engine = BlueBallEngine(records, config=_runtime_blue_params())
         blue_result = blue_engine.predict(pool_size=8)
         blue_candidates = blue_result['pool']
     else:
@@ -658,6 +658,28 @@ def resolve_runtime_config(project_root: Optional[str] = None) -> Dict[str, obje
     return _deep_merge_dict(runtime, matrix_overlay)
 
 
+def _runtime_blue_params(runtime_config: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    blue_params = runtime.get("blue_params", {}) or {}
+    return {str(key): value for key, value in blue_params.items()}
+
+
+def _position_weight_factor(ball: int, pos_weights: Optional[List[Dict[int, float]]]) -> float:
+    if not pos_weights:
+        return 1.0
+    factors = []
+    for pos_map in pos_weights:
+        if not isinstance(pos_map, dict):
+            continue
+        try:
+            factors.append(float(pos_map.get(ball, 1.0)))
+        except Exception:
+            continue
+    if not factors:
+        return 1.0
+    return sum(factors) / len(factors)
+
+
 def build_archive_lead_summary(diff_factor: float, lead_report: Dict[str, object], patch_source: str) -> str:
     healthy_agents = lead_report.get("healthy_agents", []) or []
     archive_summary = lead_report.get("archive_summary", "")
@@ -760,6 +782,7 @@ def train_lead_agent(
     window_weights: Optional[Tuple[float, ...]] = None,
     decay_gamma: float = None,
     initial_weights: Optional[Dict[str, float]] = None,
+    num_trials: int = 10,
 ) -> Dict[str, Dict[str, float]]:
     """主Agent差异学习：多窗口回测 + 时间衰减动态赋权。"""
     if learning_cycles is None:
@@ -791,7 +814,7 @@ def train_lead_agent(
     active_weight_total = 0.0
 
     for idx, cycles in enumerate(valid_windows):
-        report = _window_agent_performance(records, cycles=cycles, decay_gamma=decay_gamma)
+        report = _window_agent_performance(records, cycles=cycles, decay_gamma=decay_gamma, num_trials=num_trials)
         report_weight = normalized_window_weights[idx]
         if report["samples"] <= 0:
             report_weight = 0.0
@@ -1204,6 +1227,14 @@ def build_core_pool_snapshot(
         if agent_count >= 3:
             red_scores[ball] *= 1.0 + min(0.3, (agent_count - 2) * 0.1)
 
+    # Position weights are applied before matrix ticketing so they can affect
+    # the core pool ordering instead of only shuffling numbers inside a row.
+    if pos_weights:
+        for ball in range(1, 34):
+            if red_scores[ball] <= 0:
+                continue
+            red_scores[ball] *= _position_weight_factor(ball, pos_weights)
+
     ranked_red = sorted(red_scores.items(), key=lambda item: (-item[1], item[0]))
     ranked_blue = sorted(blue_scores.items(), key=lambda item: (-item[1], item[0]))
     red_pool = [ball for ball, score in ranked_red if score > 0][:core_red_pool_size]
@@ -1270,11 +1301,17 @@ def _select_blue_ball_for_row(
     return candidates[0][0]
 
 
-def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config: Optional[Dict[str, object]] = None) -> List[Dict[str, object]]:
+def generate_rotation_matrix_tickets(
+    snapshot: Dict[str, object],
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", CORE_RED_POOL_SIZE))
     matrix_type = str(runtime.get("matrix_params", {}).get("matrix_type", ROTATION_MATRIX_TYPE))
     preferred_rows = runtime.get("matrix_params", {}).get("preferred_rows", []) or []
+    raw_row_weights = runtime.get("matrix_params", {}).get("row_weights", {}) or {}
+    row_weights = {int(k): float(v) for k, v in raw_row_weights.items() if str(k).isdigit()}
 
     # Select rotation matrix based on type
     MATRIX_REGISTRY = {
@@ -1290,9 +1327,12 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
     active_matrix = MATRIX_REGISTRY.get(matrix_type, GLOBAL_CONFIG.rotation_matrix_rows)
     matrix_row_count = len(active_matrix)
 
-    if not preferred_rows:
-        preferred_rows = list(range(1, matrix_row_count + 1))
-    row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= matrix_row_count]
+    if preferred_rows:
+        row_order = [int(row_id) for row_id in preferred_rows if 1 <= int(row_id) <= matrix_row_count]
+    else:
+        weighted_rows = [(row_id, row_weights.get(row_id, 0.0)) for row_id in range(1, matrix_row_count + 1)]
+        weighted_rows.sort(key=lambda item: (-item[1], item[0]))
+        row_order = [row_id for row_id, _ in weighted_rows]
 
     red_pool = list(snapshot.get("red_pool", []))[:core_red_pool_size]
     blue_pool = list(snapshot.get("blue_pool", [])) or list(range(1, 17))
@@ -1308,7 +1348,16 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
 
     tickets: List[Dict[str, object]] = []
     used_blues: Set[int] = set()
-    rng = random.Random()
+    rng_seed = seed
+    if rng_seed is None:
+        rng_seed = _stable_int_seed(
+            "rotation-matrix",
+            matrix_type,
+            tuple(red_pool),
+            tuple(blue_pool),
+            tuple(row_order),
+        )
+    rng = random.Random(rng_seed)
 
     def _count_overlap(red_a: List[int], red_b: List[int]) -> int:
         return len(set(red_a) & set(red_b))
@@ -1362,23 +1411,7 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
         # Validate row indices against pool
         if max(row) >= len(red_pool):
             continue
-        # 位置权重在行级别应用：矩阵第 i 行对应第 i 个出票位次
-        # 修复：位置权重应按号码在历史开奖中的"排序位置"来加权
-        # 即：矩阵行选出的 6 个号码，分别对应第 1~6 个位置的频率权重
-        if pos_weights:
-            row_pos_idx = min(row_id - 1, 5)
-            pos_weight_map = pos_weights[row_pos_idx] if row_pos_idx < len(pos_weights) else {}
-            # 按位置权重排序：权重高的号码排在前面（对应更小的排序位置）
-            row_candidates = []
-            for idx in row:
-                ball = red_pool[idx]
-                pw = pos_weight_map.get(ball, 0.5)
-                row_candidates.append((ball, pw))
-            # 按位置权重降序排列，然后取前 6 个并排序
-            row_candidates.sort(key=lambda x: x[1], reverse=True)
-            final_red = sorted(b for b, _ in row_candidates[:6])
-        else:
-            final_red = sorted(red_pool[index] for index in row)
+        final_red = sorted(red_pool[index] for index in row)
 
         # 多样性约束：迭代检查并修复与已生成注的红球重叠度
         diversity_replacements = []
@@ -1413,6 +1446,7 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
                 break  # 找不到可替换的号码
 
         final_blue = _select_blue_ball_for_row(row_id, blue_pool, blue_scores, used_blues, rng)
+        used_blues.add(final_blue)
         source_agents = set()
         red_contrib_json = []
         red_contrib_parts = []
@@ -1461,6 +1495,7 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
             "matrix": {
                 "type": matrix_type,
                 "row_id": row_id,
+                "row_weight": round(float(row_weights.get(row_id, 0.0)), 6),
                 "covered_pool_positions": [index + 1 for index in row],
             },
             "core_pool": {
@@ -1489,20 +1524,22 @@ def generate_team_matrix_tickets(
     diff_factor: float,
     records: Optional[List[Dict]] = None,
     runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
 ) -> List[Dict[str, object]]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     pos = analyze_positions(records) if records else None
     pos_w = pos.get('pos_weights') if pos else None
     snapshot = build_core_pool_snapshot(
-        teams, lead_model, diff_factor=diff_factor, runtime_config=runtime_config, pos_weights=pos_w
+        teams, lead_model, diff_factor=diff_factor, runtime_config=runtime, pos_weights=pos_w
     )
 
     # --- 独立蓝球引擎介入：蓝球完全由 BlueBallEngine 决定 ---
     if records and len(records) >= 5:
-        runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
         core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
+        blue_config = runtime.get("blue_params", {}) or {}
 
         # 运行独立蓝球引擎
-        blue_engine = BlueBallEngine(records)
+        blue_engine = BlueBallEngine(records, config=blue_config)
         blue_result = blue_engine.predict(pool_size=max(core_blue_pool_size, 6))
 
         # 蓝球完全由引擎决定，不再融合 Agent 提案
@@ -1521,7 +1558,188 @@ def generate_team_matrix_tickets(
             'next_odd_prob': blue_result['details']['next_odd_prob'],
         }
 
-    return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime_config)
+    return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime, seed=seed)
+
+
+def generate_final_team_tickets(
+    teams: Dict[str, Dict[str, object]],
+    lead_model: Dict[str, Dict[str, float]],
+    diff_factor: float,
+    records: Optional[List[Dict]] = None,
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    final_tickets = generate_team_matrix_tickets(
+        teams,
+        lead_model=lead_model,
+        diff_factor=diff_factor,
+        records=records,
+        runtime_config=runtime_config,
+        seed=seed,
+    )
+    if final_tickets:
+        return final_tickets
+
+    generated: List[Dict[str, object]] = []
+    team_ticket_count = resolve_team_ticket_count(TEAM_TICKET_COUNT)
+    fallback_rng = random.Random(seed)
+    for i in range(team_ticket_count):
+        final_ticket = judge_with_lead_agent(
+            teams,
+            lead_model=lead_model,
+            diff_factor=diff_factor,
+            ticket_index=i,
+            seed=seed,
+            existing_tickets=generated,
+        )
+        if not final_ticket:
+            red, blue = generate_team_prediction(records or [], lead_model, rng=fallback_rng)
+            final_ticket = {
+                "red": red,
+                "blue": blue,
+                "sources": ["fallback"],
+                "explain": "来源Agent=fallback;红球贡献=na;蓝球贡献=na;多样性替换=无",
+                "explain_json": {
+                    "sources": ["fallback"],
+                    "red": [],
+                    "blue": {
+                        "ball": int(blue),
+                        "top_agent": "fallback",
+                        "top_contribution": 0.0,
+                        "agent_contributions": {},
+                    },
+                    "diversity_replacements": [],
+                },
+            }
+        generated.append(final_ticket)
+    return generated
+
+
+def team_matrix_backtest_report(
+    records: List[Dict],
+    cycles: int = 36,
+    seed: Optional[int] = None,
+    runtime_config: Optional[Dict[str, object]] = None,
+    initial_weights: Optional[Dict[str, float]] = None,
+    progress_callback=None,
+) -> Dict[str, object]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    samples = list(iterate_archived_cycles(records, cycles=cycles))
+    if not samples:
+        return {
+            "overall": {
+                "samples": 0,
+                "avg_ticket_score": 0.0,
+                "best_of_5_avg_score": 0.0,
+                "best_of_5_hit_rate_ge2": 0.0,
+                "best_of_5_hit_rate_ge3": 0.0,
+                "blue_pool_hit_rate": 0.0,
+                "final_blue_hit_rate": 0.0,
+            },
+            "matrix_rows": [],
+        }
+
+    overall = {
+        "samples": len(samples),
+        "avg_ticket_score": 0.0,
+        "best_of_5_avg_score": 0.0,
+        "best_of_5_hit_rate_ge2": 0.0,
+        "best_of_5_hit_rate_ge3": 0.0,
+        "blue_pool_hit_rate": 0.0,
+        "final_blue_hit_rate": 0.0,
+    }
+    matrix_rows: Dict[int, Dict[str, float]] = {}
+    ticket_count_total = 0
+    lead_learning_cycles = max(8, min(12, cycles))
+    lead_window_sizes = (lead_learning_cycles, max(lead_learning_cycles * 2, 24))
+
+    for sample_index, (history_timeline, target) in enumerate(samples):
+        history = list(reversed(history_timeline))
+        if progress_callback:
+            progress_callback(
+                {
+                    "current": sample_index + 1,
+                    "total": len(samples),
+                    "period": str(target.get("period", "")),
+                    "history_size": len(history),
+                }
+            )
+        sample_seed = _stable_int_seed("team-backtest", seed or 0, target.get("period", sample_index))
+        lead_model = train_lead_agent(
+            history,
+            learning_cycles=min(lead_learning_cycles, len(history)),
+            window_sizes=lead_window_sizes,
+            initial_weights=initial_weights,
+            num_trials=4,
+        )
+        diff_factor = 1.0
+        expert_teams = build_expert_teams(history, tickets=resolve_team_ticket_count(TEAM_TICKET_COUNT), seed=sample_seed)
+        tickets = generate_final_team_tickets(
+            expert_teams,
+            lead_model=lead_model,
+            diff_factor=diff_factor,
+            records=history,
+            runtime_config=runtime,
+            seed=sample_seed,
+        )
+        if not tickets:
+            continue
+
+        ticket_scores = []
+        red_hit_counts = []
+        blue_hit_any = False
+        blue_pool_hit = False
+
+        for ticket in tickets:
+            red_hits = len(set(ticket["red"]) & set(target["red_balls"]))
+            blue_hit = 1 if ticket["blue"] == target["blue_ball"] else 0
+            score = _ticket_score(ticket["red"], ticket["blue"], target)
+            ticket_scores.append(score)
+            red_hit_counts.append(red_hits)
+            blue_hit_any = blue_hit_any or bool(blue_hit)
+            ticket_count_total += 1
+
+            explain_json = ticket.get("explain_json") or {}
+            core_pool = explain_json.get("core_pool", {}) if isinstance(explain_json, dict) else {}
+            blue_pool = core_pool.get("blue_pool", []) if isinstance(core_pool, dict) else []
+            if target["blue_ball"] in blue_pool:
+                blue_pool_hit = True
+
+            row_id = int(ticket.get("matrix_row_id", 0) or 0)
+            if row_id:
+                bucket = matrix_rows.setdefault(row_id, {"row_id": row_id, "samples": 0.0, "score_total": 0.0})
+                bucket["samples"] += 1.0
+                bucket["score_total"] += score
+
+        if not ticket_scores:
+            continue
+        overall["avg_ticket_score"] += sum(ticket_scores)
+        overall["best_of_5_avg_score"] += max(ticket_scores)
+        overall["best_of_5_hit_rate_ge2"] += 1.0 if max(red_hit_counts) >= 2 else 0.0
+        overall["best_of_5_hit_rate_ge3"] += 1.0 if max(red_hit_counts) >= 3 else 0.0
+        overall["blue_pool_hit_rate"] += 1.0 if blue_pool_hit else 0.0
+        overall["final_blue_hit_rate"] += 1.0 if blue_hit_any else 0.0
+
+    sample_count = max(1, int(overall["samples"]))
+    overall["avg_ticket_score"] = round(overall["avg_ticket_score"] / max(ticket_count_total, 1), 6)
+    overall["best_of_5_avg_score"] = round(overall["best_of_5_avg_score"] / sample_count, 6)
+    overall["best_of_5_hit_rate_ge2"] = round(overall["best_of_5_hit_rate_ge2"] / sample_count, 6)
+    overall["best_of_5_hit_rate_ge3"] = round(overall["best_of_5_hit_rate_ge3"] / sample_count, 6)
+    overall["blue_pool_hit_rate"] = round(overall["blue_pool_hit_rate"] / sample_count, 6)
+    overall["final_blue_hit_rate"] = round(overall["final_blue_hit_rate"] / sample_count, 6)
+
+    matrix_row_report = []
+    for bucket in matrix_rows.values():
+        samples_count = max(bucket["samples"], 1.0)
+        matrix_row_report.append(
+            {
+                "row_id": int(bucket["row_id"]),
+                "samples": int(bucket["samples"]),
+                "avg_score": round(bucket["score_total"] / samples_count, 6),
+            }
+        )
+    matrix_row_report.sort(key=lambda row: (-row["avg_score"], row["row_id"]))
+    return {"overall": overall, "matrix_rows": matrix_row_report}
 
 
 def judge_with_lead_agent(
@@ -1781,6 +1999,10 @@ def main():
                        help='随机种子（用于复现实验）')
     parser.add_argument('--weight-patch', default=None,
                        help='权重补丁文件路径（来自 analyze_archive 导出的 weight_patch.json）')
+    parser.add_argument('--team-backtest', action='store_true',
+                       help='运行 team 端到端矩阵回测（只读历史数据，不写归档）')
+    parser.add_argument('--backtest-cycles', type=int, default=36,
+                       help='team 端到端矩阵回测期数（默认36期）')
     parser.add_argument('--advanced', '-adv', action='store_true',
                        help='使用高级综合分析（时间加权+关联分析+模式识别+遗传算法）')
     parser.add_argument('--enhanced', '-e', action='store_true',
@@ -1824,6 +2046,59 @@ def main():
     print("\n" + "=" * 60)
     print("🎯 预测号码")
     print("=" * 60)
+
+    if args.team_backtest:
+        resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
+        _ = patch_source
+        runtime_config = resolve_runtime_config()
+        initial_weights = load_weight_patch(resolved_patch_path)
+        expert_backtest = backtest_report(records, learning_cycles=min(args.backtest_cycles, args.learn_cycles or args.backtest_cycles))
+        progress_state = {"last_len": 0}
+
+        def _print_team_backtest_progress(update: Dict[str, object]) -> None:
+            current = int(update.get("current", 0))
+            total = int(update.get("total", 0))
+            period = str(update.get("period", ""))
+            progress_text = f"\r⏳ team 回测进度: {current}/{total} | period={period}"
+            print(progress_text, end="", flush=True)
+            progress_state["last_len"] = len(progress_text)
+
+        team_backtest = team_matrix_backtest_report(
+            records,
+            cycles=args.backtest_cycles,
+            seed=args.seed,
+            runtime_config=runtime_config,
+            initial_weights=initial_weights,
+            progress_callback=_print_team_backtest_progress,
+        )
+        if progress_state["last_len"]:
+            print()
+        print("\n📊 单专家回测:")
+        print(
+            f"  - 样本 {expert_backtest['overall']['samples']} | 平均分 {expert_backtest['overall']['avg_score']:.3f} | "
+            f"红2+命中率 {expert_backtest['overall']['hit_rate_ge2']:.2%} | 蓝球命中率 {expert_backtest['overall']['blue_hit_rate']:.2%}"
+        )
+        print("\n🧪 最终链路回测:")
+        print(
+            f"  - 样本 {team_backtest['overall']['samples']} | 单注平均分 {team_backtest['overall']['avg_ticket_score']:.3f} | "
+            f"best-of-5 平均分 {team_backtest['overall']['best_of_5_avg_score']:.3f}"
+        )
+        print(
+            f"  - best-of-5 红2+率 {team_backtest['overall']['best_of_5_hit_rate_ge2']:.2%} | "
+            f"best-of-5 红3+率 {team_backtest['overall']['best_of_5_hit_rate_ge3']:.2%}"
+        )
+        print(
+            f"  - 蓝球池命中率 {team_backtest['overall']['blue_pool_hit_rate']:.2%} | "
+            f"最终5注蓝球命中率 {team_backtest['overall']['final_blue_hit_rate']:.2%}"
+        )
+        if team_backtest["matrix_rows"]:
+            print("  - 矩阵行表现:")
+            for row in team_backtest["matrix_rows"]:
+                print(f"    row={row['row_id']} | samples={row['samples']} | avg_score={row['avg_score']:.3f}")
+        print("\n" + "=" * 60)
+        print("⚠️ 仅供娱乐，不构成投注建议！")
+        print("=" * 60)
+        return
 
     if args.mode == 'team':
         latest_archive = load_latest_archive()
@@ -1883,49 +2158,17 @@ def main():
         next_date = next_draw_date_str(records)
         print(f"📅 预测期号: {target_period} | 预计开奖: {next_date}")
         print(f"📐 红球核心池: {CORE_RED_POOL_SIZE}球 | 蓝球核心池: {CORE_BLUE_POOL_SIZE}球 | 旋转矩阵: {ROTATION_MATRIX_TYPE}")
-        final_tickets = generate_team_matrix_tickets(
+        final_tickets = generate_final_team_tickets(
             expert_teams,
             lead_model=lead_model,
             diff_factor=diff_factor,
             records=records,
             runtime_config=runtime_config,
+            seed=args.seed,
         )
-        if not final_tickets:
-            final_tickets = []
-            for i in range(team_ticket_count):
-                final_ticket = judge_with_lead_agent(
-                    expert_teams,
-                    lead_model=lead_model,
-                    diff_factor=diff_factor,
-                    ticket_index=i,
-                    seed=args.seed,
-                    existing_tickets=final_tickets,
-                )
-                if not final_ticket:
-                    red, blue = generate_team_prediction(records, lead_model, rng=rng)
-                    sources = []
-                    explain = "来源Agent=fallback;红球贡献=na;蓝球贡献=na;多样性替换=无"
-                    explain_json = {
-                        "sources": ["fallback"],
-                        "red": [],
-                        "blue": {"ball": int(blue), "top_agent": "fallback", "top_contribution": 0.0, "agent_contributions": {}},
-                        "diversity_replacements": [],
-                    }
-                else:
-                    red, blue = final_ticket["red"], final_ticket["blue"]
-                    sources = final_ticket["sources"]
-                    explain = final_ticket.get("explain", "")
-                    explain_json = final_ticket.get("explain_json")
-                final_tickets.append({
-                    "red": red,
-                    "blue": blue,
-                    "sources": sources or ["fallback"],
-                    "explain": explain,
-                    "explain_json": explain_json,
-                })
         # Show pooled diagnostic info
         if records and len(records) >= 20:
-            blue_engine = BlueBallEngine(records)
+            blue_engine = BlueBallEngine(records, config=_runtime_blue_params(runtime_config))
             blue_diag = blue_engine.predict(pool_size=6)
             cold_chase_str = ", ".join(f"{n:02d}(缺{m}期)" for n, m in blue_diag.get('cold_chase', []))
             if cold_chase_str:

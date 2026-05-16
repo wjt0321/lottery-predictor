@@ -34,7 +34,7 @@
 - 🔬 **高级分析模块**：时间加权、关联分析、模式识别、遗传算法
 - ♻️ **自学习闭环方向**：基于归档回测持续调权调参
 - 🤖 **8-Agent团队模式**：先聚合核心号码池，再用旋转矩阵固定出票 5 注
-- 🎯 **V4 命中率优化**：多样性约束修复、蓝球区分度保留、冷号配额提升、回测多次采样、矩阵行动态淘汰
+- 🎯 **V5 命中率优化**：蓝球去重与配置回灌、端到端 team 回测、矩阵行动态排序、位置权重前移
 
 ## 功能特点
 
@@ -103,6 +103,9 @@ python predict.py --advanced
 
 # 查看帮助
 python predict.py --help
+
+# 运行 team 端到端矩阵回测（会实时显示进度）
+python predict.py --team-backtest --backtest-cycles 36 --seed 42
 ```
 
 **参数说明**：
@@ -114,6 +117,8 @@ python predict.py --help
 - `--learn-cycles`: 团队模式回看期数（默认24期）
 - `--seed`: 随机种子（用于复现实验）
 - `--weight-patch`: 显式指定权重补丁路径（未指定时自动尝试 `config/weight_patch.latest.json`）
+- `--team-backtest`: 运行最终 team 矩阵出票链路回测（不写归档，输出单专家口径与最终 5 注口径）
+- `--backtest-cycles`: team 端到端回测期数（默认36期）
 
 ### 3. manual_data_import.py - 手动数据导入
 
@@ -224,9 +229,9 @@ python predict.py --advanced --num 5
 - 使用固定旋转矩阵把核心池压缩为 `5` 注 `6+1`
   - `10_red_guard_6_to_5`：10 球核心池，5 行矩阵
   - `14_red_guard_6_to_5`：14 球核心池，5 行矩阵
-- 矩阵每行独立应用历史位置权重，而非全局一次性排序
+- 位置权重会前移到核心池评分阶段，真正影响候选集合
 - 这样可以尽量保留号码池价值，避免在拆票阶段把高价值号码关系随机稀释
-- **动态淘汰**：分析器会自动排除表现低于平均分 80% 的矩阵行
+- **动态排序**：分析器会根据矩阵行历史表现调整优先顺序，但仍保持固定输出 5 注
 
 #### 3. 自学习闭环
 
@@ -244,6 +249,7 @@ python predict.py --advanced --num 5
 - `param patch`
   - 当前不提供单独 CLI 参数
   - 默认自动尝试 `config/param_patch.latest.json`
+  - 可覆盖 `blue_params`、核心池参数和融合参数
 - `matrix patch`
   - 当前不提供单独 CLI 参数
   - 默认自动尝试 `config/matrix_patch.latest.json`
@@ -324,6 +330,7 @@ python predict.py --mode team --num 5 --learn-cycles 24
 | 预测 | 单策略快速对比 | `python predict.py --mode single --all --num 3` |
 | 预测 | 指定策略复现实验 | `python predict.py --mode single --strategy hot --num 3 --seed 42` |
 | 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
+| 分析 | team 端到端矩阵回测（带进度） | `python predict.py --team-backtest --backtest-cycles 36 --seed 42` |
 | 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
 | 分析 | 导出报告并写回三类补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
 | 补丁回灌 | 显式加载权重补丁参与团队预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
@@ -394,6 +401,13 @@ lottery-predictor/
 
 ## 更新日志
 
+- **2026-05-16 (V5)**:
+  - 蓝球覆盖修复：5 注蓝球优先去重，且同样输入的蓝球选择可复现
+  - 蓝球配置回灌：`blue_params` 统一从 `project_config.py` / `param_patch` 进入 `BlueBallEngine`
+  - 新增 team 端到端矩阵回测：输出单专家口径与最终 5 注口径，支持 `--team-backtest`
+  - 回测可见性与性能优化：长回测期间输出进度，并使用轻量训练参数缩短完整回测耗时
+  - 矩阵行语义修正：从“动态淘汰”调整为“动态排序”，`row_weights` 可直接影响默认行顺序
+  - 位置权重前移：改为作用在核心池评分阶段，真正影响 `red_pool`
 - **2026-05-16 (V4)**:
   - 多样性约束修复：`_find_swap_target` → `_find_best_swap`，最优替代 + 多次迭代
   - 蓝球双重归一化修复：删除第二次 MinMax，保留引擎原始区分度 [0.1, 3.0]
