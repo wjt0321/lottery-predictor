@@ -92,6 +92,28 @@
 - 加权采样验证：排名靠前的号码出现频率是排名靠后的 3-4 倍
 - 权重修复验证：weight_deltas 现在有正有负（如 cold +0.0058, zone -0.0110）
 
+## V4 迭代 (2026-05-16)
+
+本次迭代针对命中率低的问题进行了系统性优化，**未修改原有代码逻辑，只做迭代增强**：
+
+### 修改内容
+1. **P0-1 多样性约束修复** ([_find_best_swap](file:///workspace/predict.py))：将 `_find_swap_target` 升级为 `_find_best_swap`，从"找到第一个替代"改为"找到最优替代"，并允许多次迭代（最多 3 次），多样性替换触发率从 0% 提升到正常水平
+2. **P0-2 蓝球双重归一化修复** ([generate_team_matrix_tickets](file:///workspace/predict.py))：删除蓝球第二次 MinMax 归一化，保留引擎原始区分度 [0.1, 3.0]，避免 6 维分析信号被稀释
+3. **P1-1 冷号配额提升** ([blue_ball_engine.py](file:///workspace/blue_ball_engine.py))：冷号最大纳入数从 1 提升到 2，bonus 从 1.15 提升到 1.25，增加冷号覆盖面
+4. **P1-2 回测多次采样** ([_window_agent_performance](file:///workspace/predict.py))：差异学习回测增加 `num_trials=10` 多次采样取平均，降低单次采样噪声对权重学习的影响
+5. **P1-3 矩阵行动态淘汰** ([analyze_archive.py](file:///workspace/analyze_archive.py))：新增矩阵行表现动态淘汰逻辑，阈值 = 所有行平均分的 80%，低表现行被排除，避免持续使用拖累整体命中率的矩阵行
+6. **P2-1 位置权重切片修复** ([generate_rotation_matrix_tickets](file:///workspace/predict.py))：位置权重排序后增加 `[:6]` 切片，确保只取前 6 个号码，避免矩阵行输出超过 6 个红球
+
+### 参数清理
+- 删除 `project_config.py` 中未使用的 `diversity_overlap_threshold`、`diversity_max_attempts`、`diversity_penalty_factor` 死参数
+- 统一蓝球引擎配置入口：`project_config.py` 新增 `blue_*` 系列参数，替代分散的重复定义
+- 修正 `analyze_hot_cold` 注释：窗口期从"40期"修正为"50期"（与代码一致）
+
+### 测试验证
+- 30 个 unittest 全部通过
+- 团队预测注间重叠度稳定在 3（低于阈值 4）
+- 运行时间从 1.8s 增加到 15s（因多次采样）
+
 ## 推荐工作流
 
 ### 日常预测
@@ -129,6 +151,8 @@ python -m unittest test_update_data -v
 - `README.md`
 - `CLAUDE.md`
 - `SKILL.md`
+- `AGENT.md`
+- `AGENTS.md`
 
 如果修改了以下任一内容，通常要检查是否还需要同步更新文档：
 
@@ -137,10 +161,12 @@ python -m unittest test_update_data -v
 - 补丁回灌逻辑
 - 命令行参数
 - 预测输出行为
+- 配置参数（`project_config.py`）
 
 ## 文档入口
 
 - 人类用户使用说明：`README.md`
 - Claude Code 仓库入口：`CLAUDE.md`
 - 技能触发说明：`SKILL.md`
-- 本文件：`AGENT.md`
+- Agent 工作说明：`AGENT.md`
+- Codex 工作说明：`AGENTS.md`

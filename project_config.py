@@ -48,16 +48,19 @@ class ProjectConfig:
 
     min_ticket_weight: float = 0.02
     min_pool_score: float = 0.0001
-    diversity_overlap_threshold: int = 4
-    diversity_max_attempts: int = 4
-    diversity_penalty_factor: float = 0.62
-    
-    blue_repeat_high_rate: float = 0.08
-    blue_repeat_bonus: float = 1.5
-    blue_repeat_penalty: float = 0.8
-    missing_threshold: int = 20
-    missing_bonus: float = 1.15
-    missing_penalty: float = 0.9
+
+    # 蓝球引擎参数（统一配置入口，通过 dict 传入 BlueBallEngine）
+    blue_missing_cold_threshold: int = 20
+    blue_missing_cold_bonus: float = 1.8
+    blue_missing_extreme_threshold: int = 40
+    blue_missing_extreme_bonus: float = 2.5
+    blue_parity_window: int = 15
+    blue_zone_window: int = 30
+    blue_amplitude_window: int = 30
+    blue_heat_window: int = 20
+    blue_cold_chase_cap: int = 3
+
+    # 位置权重参数
     pos_weight_min: float = 0.6
     pos_weight_max: float = 1.5
     

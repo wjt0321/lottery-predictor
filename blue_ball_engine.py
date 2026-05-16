@@ -229,7 +229,37 @@ class BlueBallEngine:
         return scores
 
     # =========================================================================
-    # 6. 贝叶斯概率更新（基于历史先验 → 条件更新）
+    # 6. 移动平均与回归分析
+    # =========================================================================
+    def analyze_moving_average(self, window: int = 10) -> Dict:
+        """蓝球移动平均与标准差分析
+        
+        当蓝球连续偏离均值时，下一期回归均值的概率增加（均值回归效应）
+        """
+        if len(self.records) < window + 1:
+            return {'mean': 8.5, 'std': 4.5, 'last': 8, 'deviation': 0, 'regression_weight': 0}
+        
+        recent_blues = [r['blue_ball'] for r in self.records[:window]]
+        mean = sum(recent_blues) / len(recent_blues)
+        variance = sum((x - mean) ** 2 for x in recent_blues) / len(recent_blues)
+        std = math.sqrt(variance) if variance > 0 else 1.0
+        
+        last_blue = self.records[0]['blue_ball']
+        deviation = (last_blue - mean) / (std + 0.1)  # 偏离均值的标准差倍数
+        
+        # 偏离越大，回归权重越高（但不超过上限）
+        regression_weight = min(abs(deviation) * 0.3, 0.5)
+        
+        return {
+            'mean': mean,
+            'std': std,
+            'last': last_blue,
+            'deviation': deviation,
+            'regression_weight': regression_weight
+        }
+
+    # =========================================================================
+    # 7. 贝叶斯概率更新（基于历史先验 → 条件更新）
     # =========================================================================
     def bayesian_update(self, base_scores: Dict[int, float],
                         last_n: int = 5) -> Dict[int, float]:
@@ -276,14 +306,16 @@ class BlueBallEngine:
         zone_probs = self.analyze_zone_transition()
         amp_scores = self.analyze_amplitude()
         heat_scores = self.analyze_heat()
+        ma_analysis = self.analyze_moving_average(window=10)
 
         # 加权融合
         weights = {
-            'missing': 0.30,   # 遗漏值权重最高（追冷）
+            'missing': 0.25,   # 遗漏值权重（追冷）
             'parity': 0.15,    # 奇偶轮动
             'zone': 0.15,      # 区间转移
             'amplitude': 0.15, # 振幅
-            'heat': 0.25,      # 短期热度
+            'heat': 0.20,      # 短期热度
+            'regression': 0.10, # 均值回归
         }
 
         raw_scores = {}
@@ -296,13 +328,29 @@ class BlueBallEngine:
             parity_match = next_odd_prob if num % 2 == 1 else (1 - next_odd_prob)
             parity_score = 0.5 + parity_match * 1.0
 
+            # 均值回归分：越接近移动平均，分数越高
+            ma = ma_analysis['mean']
+            std = ma_analysis['std']
+            regression_score = math.exp(-0.5 * ((num - ma) / (std + 1)) ** 2)
+
             raw_scores[num] = (
                 weights['missing'] * missing_scores[num] +
                 weights['parity'] * parity_score +
                 weights['zone'] * zone_score +
                 weights['amplitude'] * amp_scores[num] +
-                weights['heat'] * heat_scores[num]
+                weights['heat'] * heat_scores[num] +
+                weights['regression'] * regression_score
             )
+
+        # 如果蓝球显著偏离均值，加大回归权重
+        if ma_analysis['regression_weight'] > 0:
+            for num in self.blue_range:
+                ma = ma_analysis['mean']
+                std = ma_analysis['std']
+                distance = abs(num - ma) / (std + 1)
+                # 接近均值的号码获得额外加成
+                if distance < 0.5:
+                    raw_scores[num] *= (1 + ma_analysis['regression_weight'])
 
         # 贝叶斯更新
         final_scores = self.bayesian_update(raw_scores)
@@ -328,13 +376,15 @@ class BlueBallEngine:
 
         # 软加权：冷号通过遗漏维度分数自然参与排序
         # 如果冷号分数足够高就能自然进入前 N，不再强制替换
-        # 仅当冷号确实在 pool 外且分数接近阈值时，给予微小 bonus
+        # 仅当冷号确实在 pool 外时，给予适度 bonus 使其有机会进入候选池
+        # 冷号配额提升到 2，bonus 提升到 1.25，增加冷号覆盖面
         cold_bonus_applied = 0
+        max_cold_bonus = 2  # 最多纳入 2 个冷号
         for num, _ in cold_chase:
-            if num not in pool and cold_bonus_applied < 1:
-                # 给冷号分数一个微小提升后重新排序，最多只纳入 1 个
+            if num not in pool and cold_bonus_applied < max_cold_bonus:
+                # 给冷号分数适度提升后重新排序
                 boosted_scores = dict(final_scores)
-                boosted_scores[num] *= 1.15
+                boosted_scores[num] *= 1.25
                 re_ranked = sorted(boosted_scores.items(), key=lambda x: x[1], reverse=True)
                 new_pool = [n for n, _ in re_ranked[:pool_size]]
                 if num in new_pool:
@@ -355,6 +405,13 @@ class BlueBallEngine:
                 'parity_seq': parity_seq[:10],
                 'amp_scores': {num: round(amp_scores[num], 4) for num in self.blue_range},
                 'heat_scores': {num: round(heat_scores[num], 4) for num in self.blue_range},
+                'moving_average': {
+                    'mean': round(ma_analysis['mean'], 2),
+                    'std': round(ma_analysis['std'], 2),
+                    'last': ma_analysis['last'],
+                    'deviation': round(ma_analysis['deviation'], 3),
+                    'regression_weight': round(ma_analysis['regression_weight'], 3),
+                },
             },
             'cold_chase': [(num, missing[num]) for num, _ in cold_chase],
         }

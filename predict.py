@@ -53,7 +53,7 @@ def load_data():
 
 
 def analyze_hot_cold(records, recent_periods=None):
-    """冷热号分析 - 优化：增加蓝球冷号分析；扩大窗口至40期捕捉更长趋势"""
+    """冷热号分析 - 优化：增加蓝球冷号分析；使用50期窗口捕捉中长趋势"""
     if recent_periods is None:
         recent_periods = CONFIG.hot_cold_window
     recent = records[:recent_periods]
@@ -668,7 +668,9 @@ def _window_agent_performance(
     records: List[Dict],
     cycles: int,
     decay_gamma: float,
+    num_trials: int = 10,
 ) -> Dict[str, object]:
+    """评估 Agent 在滑动窗口上的表现，每个 Agent 每期运行多次取平均以降低随机噪声。"""
     samples = list(iterate_archived_cycles(records, cycles=cycles))
     if not samples:
         return {
@@ -685,11 +687,15 @@ def _window_agent_performance(
     for idx, (history_timeline, target) in enumerate(samples):
         history = list(reversed(history_timeline))
         round_weight = decay_gamma ** (len(samples) - idx - 1)
-        per_round_scores = {}
+        # 每个 Agent 运行多次取平均，降低单次随机采样的噪声
+        per_round_scores = {agent: 0.0 for agent in AGENT_TEAMS}
+        for trial in range(num_trials):
+            for agent in AGENT_TEAMS:
+                rng = random.Random(_stable_int_seed("lead", cycles, target.get("period", idx), agent, trial))
+                red, blue = generate_prediction(history, strategy=agent, rng=rng)
+                per_round_scores[agent] += _ticket_score(red, blue, target)
         for agent in AGENT_TEAMS:
-            rng = random.Random(_stable_int_seed("lead", cycles, target.get("period", idx), agent))
-            red, blue = generate_prediction(history, strategy=agent, rng=rng)
-            per_round_scores[agent] = _ticket_score(red, blue, target)
+            per_round_scores[agent] /= num_trials
 
         team_avg = sum(per_round_scores.values()) / len(per_round_scores)
         for agent, score in per_round_scores.items():
@@ -714,9 +720,12 @@ def _window_agent_performance(
             history = list(reversed(history_timeline))
             round_weight = decay_gamma ** (len(samples) - idx - 1)
             for agent in AGENT_TEAMS:
-                rng = random.Random(_stable_int_seed("trend", cycles, target.get("period", idx), agent))
-                red, blue = generate_prediction(history, strategy=agent, rng=rng)
-                s = _ticket_score(red, blue, target)
+                trial_scores = []
+                for trial in range(num_trials):
+                    rng = random.Random(_stable_int_seed("trend", cycles, target.get("period", idx), agent, trial))
+                    red, blue = generate_prediction(history, strategy=agent, rng=rng)
+                    trial_scores.append(_ticket_score(red, blue, target))
+                s = sum(trial_scores) / len(trial_scores)
                 if idx < mid:
                     early_scores[agent] += s * round_weight
                     early_w += round_weight
@@ -1304,28 +1313,49 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
     def _count_overlap(red_a: List[int], red_b: List[int]) -> int:
         return len(set(red_a) & set(red_b))
 
-    def _find_swap_target(row_red: List[int], pool: List[int], row_indices: Tuple[int, ...],
-                          pool_sources: Dict[int, Set[str]], red_agent_contrib: Dict[int, Dict[str, float]]) -> Optional[Tuple[int, int]]:
-        """找到可交换的池位：优先换出跨 Agent 共识低或分数最低的号码。"""
-        # 计算每个号码的"可替换优先级"（分数越低、共识越少越优先）
+    def _find_best_swap(row_red: List[int], pool: List[int], row_indices: Tuple[int, ...],
+                        pool_sources: Dict[int, Set[str]], red_agent_contrib: Dict[int, Dict[str, float]],
+                        existing_tickets: List[Dict]) -> Optional[Tuple[int, int]]:
+        """找到最优交换：换出后能使与所有已生成票的最大重叠度降低最多的号码。"""
+        # 计算每个号码的可替换优先级（分数越低、共识越少越优先）
         scored = []
         for idx in row_indices:
             ball = pool[idx]
             agent_count = len(pool_sources.get(ball, set()))
             contrib = red_agent_contrib.get(ball, {})
             max_contrib = max(contrib.values()) if contrib else 0.0
-            # 分数越低、agent 共识越少，越应该被替换
             scored.append((idx, ball, max_contrib, agent_count))
-        scored.sort(key=lambda x: (x[3], x[2]))  # 先按 agent_count 升序，再按分数升序
+        # 按可替换优先级排序：agent_count 少的优先，分数低的优先
+        scored.sort(key=lambda x: (x[3], x[2]))
+
+        # 当前与所有已生成票的最大重叠
+        current_max_overlap = max(
+            (_count_overlap(row_red, t["red"]) for t in existing_tickets),
+            default=0
+        )
+
+        best_swap = None
+        best_improvement = 0
 
         for replace_idx, replace_ball, _, _ in scored:
-            # 从 pool 中找不在当前 row 的替代号码
+            # 尝试每个不在当前 row 的替代号码
             for alt_idx, alt_ball in enumerate(pool):
                 if alt_idx in row_indices:
                     continue
-                # 检查替换后是否增加多样性
-                return (replace_idx, alt_idx)
-        return None
+                # 模拟替换后的新 row
+                new_red = sorted([alt_ball if b == replace_ball else b for b in row_red])
+                # 计算替换后与所有已生成票的最大重叠
+                new_max_overlap = max(
+                    (_count_overlap(new_red, t["red"]) for t in existing_tickets),
+                    default=0
+                )
+                improvement = current_max_overlap - new_max_overlap
+                # 优先选择改进最大的；如果改进相同，优先替换优先级高的（排前面的）
+                if improvement > best_improvement or (improvement == best_improvement and best_swap is None):
+                    best_improvement = improvement
+                    best_swap = (replace_idx, alt_idx)
+
+        return best_swap
 
     for row_id in row_order:
         row = active_matrix[row_id - 1]
@@ -1333,37 +1363,54 @@ def generate_rotation_matrix_tickets(snapshot: Dict[str, object], runtime_config
         if max(row) >= len(red_pool):
             continue
         # 位置权重在行级别应用：矩阵第 i 行对应第 i 个出票位次
+        # 修复：位置权重应按号码在历史开奖中的"排序位置"来加权
+        # 即：矩阵行选出的 6 个号码，分别对应第 1~6 个位置的频率权重
         if pos_weights:
             row_pos_idx = min(row_id - 1, 5)
             pos_weight_map = pos_weights[row_pos_idx] if row_pos_idx < len(pos_weights) else {}
+            # 按位置权重排序：权重高的号码排在前面（对应更小的排序位置）
             row_candidates = []
             for idx in row:
                 ball = red_pool[idx]
                 pw = pos_weight_map.get(ball, 0.5)
                 row_candidates.append((ball, pw))
+            # 按位置权重降序排列，然后取前 6 个并排序
             row_candidates.sort(key=lambda x: x[1], reverse=True)
-            final_red = sorted(b for b, _ in row_candidates)
+            final_red = sorted(b for b, _ in row_candidates[:6])
         else:
             final_red = sorted(red_pool[index] for index in row)
 
-        # 多样性约束：检查与已生成注的红球重叠度
+        # 多样性约束：迭代检查并修复与已生成注的红球重叠度
         diversity_replacements = []
-        for existing in tickets:
-            overlap = _count_overlap(final_red, existing["red"])
-            if overlap >= 4:
-                swap = _find_swap_target(final_red, red_pool, row, pool_sources, red_agent_contrib)
-                if swap:
-                    old_idx, new_idx = swap
-                    old_ball = red_pool[old_idx]
-                    new_ball = red_pool[new_idx]
-                    # 执行交换
-                    final_red = sorted([new_ball if b == old_ball else b for b in final_red])
-                    diversity_replacements.append({
-                        "replaced": int(old_ball),
-                        "replacement": int(new_ball),
-                        "reason": f"overlap_{overlap}_with_row_{existing['matrix_row_id']}"
-                    })
-                    break  # 一次只处理一次替换
+        max_attempts = 3  # 每行最多尝试 3 次替换
+        for _attempt in range(max_attempts):
+            if not tickets:
+                break
+            # 找出与当前行重叠最大的已生成票
+            worst_overlap = 0
+            worst_ticket = None
+            for existing in tickets:
+                overlap = _count_overlap(final_red, existing["red"])
+                if overlap > worst_overlap:
+                    worst_overlap = overlap
+                    worst_ticket = existing
+            # 如果最大重叠 < 4，满足多样性约束
+            if worst_overlap < 4:
+                break
+            # 尝试找到最优替换
+            swap = _find_best_swap(final_red, red_pool, row, pool_sources, red_agent_contrib, tickets)
+            if swap:
+                old_idx, new_idx = swap
+                old_ball = red_pool[old_idx]
+                new_ball = red_pool[new_idx]
+                final_red = sorted([new_ball if b == old_ball else b for b in final_red])
+                diversity_replacements.append({
+                    "replaced": int(old_ball),
+                    "replacement": int(new_ball),
+                    "reason": f"overlap_{worst_overlap}_with_row_{worst_ticket['matrix_row_id']}"
+                })
+            else:
+                break  # 找不到可替换的号码
 
         final_blue = _select_blue_ball_for_row(row_id, blue_pool, blue_scores, used_blues, rng)
         source_agents = set()
@@ -1459,21 +1506,15 @@ def generate_team_matrix_tickets(
         blue_result = blue_engine.predict(pool_size=max(core_blue_pool_size, 6))
 
         # 蓝球完全由引擎决定，不再融合 Agent 提案
+        # 引擎内部已将分数归一化到 [0.1, 3.0]，保留充分区分度
+        # 不再做第二次 MinMax 压缩，避免稀释 6 维分析信号
         engine_scores = blue_result['scores']
-        # 独立 MinMax 归一化到 [0, 1]，确保信号贡献均衡
-        min_es = min(engine_scores.values())
-        max_es = max(engine_scores.values())
-        span_es = max_es - min_es
-        if span_es > 0.01:
-            normalized_scores = {b: (engine_scores[b] - min_es) / span_es for b in engine_scores}
-        else:
-            normalized_scores = {b: 1.0 for b in engine_scores}
 
-        ranked_blue = sorted(normalized_scores.items(), key=lambda x: x[1], reverse=True)
+        ranked_blue = sorted(engine_scores.items(), key=lambda x: x[1], reverse=True)
         blue_pool = [b for b, _ in ranked_blue[:core_blue_pool_size]]
 
         snapshot['blue_pool'] = blue_pool
-        snapshot['blue_scores'] = {b: round(float(normalized_scores.get(b, 1.0)), 6) for b in blue_pool}
+        snapshot['blue_scores'] = {b: round(float(engine_scores.get(b, 1.0)), 6) for b in blue_pool}
         snapshot['blue_engine_details'] = {
             'engine_pool': blue_result['pool'],
             'cold_chase': blue_result.get('cold_chase', []),
@@ -1976,7 +2017,120 @@ class AdvancedAnalyzer:
         }
     
     # ========================================================================
-    # 2. 号码关联分析（马尔可夫链 + 共现分析）
+    # 2. AC值分析（算术复杂度）
+    # ========================================================================
+    def calculate_ac_value(self, balls: List[int]) -> int:
+        """计算一组红球的AC值（算术复杂度）
+        
+        AC值 = 两两差值的不同值数量 - 5
+        反映号码的离散程度：
+        - AC值小：差值重复多，号码有关联（连号、等差号）
+        - AC值大：号码杂乱无章
+        历史开奖AC值通常在 5-10 之间
+        """
+        if len(balls) < 2:
+            return 0
+        sorted_balls = sorted(balls)
+        diffs = set()
+        for i in range(len(sorted_balls)):
+            for j in range(i + 1, len(sorted_balls)):
+                diffs.add(sorted_balls[j] - sorted_balls[i])
+        return len(diffs) - (len(sorted_balls) - 1)
+
+    def analyze_ac_value_distribution(self, recent_periods: int = 50) -> Dict:
+        """分析近期AC值分布，确定合理的AC值范围"""
+        if len(self.records) < 5:
+            return {'target_ac_range': (4, 10), 'avg_ac': 7.0, 'ac_std': 2.0}
+        
+        recent = self.records[:recent_periods]
+        ac_values = [self.calculate_ac_value(r['red_balls']) for r in recent]
+        
+        avg_ac = sum(ac_values) / len(ac_values)
+        variance = sum((x - avg_ac) ** 2 for x in ac_values) / len(ac_values)
+        std_ac = math.sqrt(variance)
+        
+        # 目标范围：均值 ± 1个标准差
+        target_min = max(3, int(avg_ac - std_ac))
+        target_max = min(12, int(avg_ac + std_ac))
+        
+        return {
+            'target_ac_range': (target_min, target_max),
+            'avg_ac': avg_ac,
+            'ac_std': std_ac,
+            'ac_history': ac_values[:10]
+        }
+
+    # ========================================================================
+    # 3. 熵值分析（信息熵）
+    # ========================================================================
+    def calculate_entropy(self, frequencies: Dict[int, int], total: int) -> float:
+        """计算信息熵：衡量分布的不确定性
+        
+        熵值高：分布均匀，冷热不分明（每个号码出现概率接近）
+        熵值低：分布集中，冷热分明（少数号码频繁出现）
+        """
+        if total <= 0:
+            return 0.0
+        entropy = 0.0
+        for count in frequencies.values():
+            if count > 0:
+                p = count / total
+                entropy -= p * math.log2(p)
+        return entropy
+
+    def analyze_entropy_trend(self, window_sizes: List[int] = [20, 50, 100]) -> Dict:
+        """分析不同时间窗口的熵值变化趋势
+        
+        返回：
+        - 当前处于"冷热分明"还是"均匀分布"阶段
+        - 熵值变化趋势（上升/下降）
+        """
+        if len(self.records) < max(window_sizes):
+            return {'phase': 'unknown', 'entropy_scores': {}, 'trend': 'stable'}
+        
+        entropy_by_window = {}
+        for window in window_sizes:
+            recent = self.records[:window]
+            red_freq = Counter()
+            for r in recent:
+                red_freq.update(r['red_balls'])
+            total = sum(red_freq.values())
+            entropy = self.calculate_entropy(red_freq, total)
+            # 归一化到 [0, 1]：最大熵 = log2(33) ≈ 5.04
+            max_entropy = math.log2(33)
+            normalized = entropy / max_entropy
+            entropy_by_window[window] = {
+                'raw': entropy,
+                'normalized': normalized
+            }
+        
+        # 判断阶段：用最近20期的熵值
+        recent_entropy = entropy_by_window[20]['normalized']
+        if recent_entropy < 0.85:
+            phase = 'polarized'  # 冷热分明
+        elif recent_entropy > 0.95:
+            phase = 'uniform'    # 均匀分布
+        else:
+            phase = 'balanced'   # 相对均衡
+        
+        # 趋势判断：比较近20期 vs 近50期
+        trend = 'stable'
+        if len(window_sizes) >= 2:
+            e20 = entropy_by_window[window_sizes[0]]['normalized']
+            e50 = entropy_by_window[window_sizes[1]]['normalized']
+            if e20 > e50 + 0.05:
+                trend = 'rising'    # 趋向均匀
+            elif e20 < e50 - 0.05:
+                trend = 'falling'   # 趋向集中
+        
+        return {
+            'phase': phase,
+            'entropy_scores': entropy_by_window,
+            'trend': trend
+        }
+
+    # ========================================================================
+    # 4. 号码关联分析（马尔可夫链 + 共现分析）
     # ========================================================================
     def analyze_number_correlation(self) -> Dict:
         """号码关联分析：分析哪些号码经常一起出现"""
@@ -2101,25 +2255,36 @@ class AdvancedAnalyzer:
     class GeneticOptimizer:
         """遗传算法优化器"""
         
-        def __init__(self, analyzer: 'AdvancedAnalyzer', population_size: int = 50, generations: int = 30):
+        def __init__(self, analyzer: 'AdvancedAnalyzer', population_size: int = 50, generations: int = 30, ac_range: Optional[Tuple[int, int]] = None):
             self.analyzer = analyzer
             self.population_size = population_size
             self.generations = generations
             self.records = analyzer.records
+            self.ac_range = ac_range or (4, 10)  # 默认合理范围
             
             # 预计算历史数据用于适应度评估
             self.historical_sets = [set(r['red_balls']) for r in self.records[:50]]
+            
+            # 预计算AC值约束
+            self.ac_min, self.ac_max = self.ac_range
         
         def create_individual(self, rng: random.Random) -> Set[int]:
-            """创建一个个体（6个红球）"""
-            return set(rng.sample(range(1, 34), 6))
+            """创建一个个体（6个红球），确保AC值在合理范围内"""
+            max_attempts = 100
+            for _ in range(max_attempts):
+                individual = set(rng.sample(range(1, 34), 6))
+                ac = self.analyzer.calculate_ac_value(list(individual))
+                if self.ac_min <= ac <= self.ac_max:
+                    return individual
+            # 如果多次尝试都失败，返回最后一个
+            return individual
         
         def fitness(self, individual: Set[int]) -> float:
-            """适应度函数：与历史开奖的重合度"""
+            """多目标适应度函数：历史重合度 + AC值约束 + 冷热平衡 + 区间均衡"""
             if not self.historical_sets:
                 return 0.5
             
-            # 计算与历史开奖的平均重合度
+            # 1. 计算与历史开奖的平均重合度
             total_score = 0
             for historical in self.historical_sets:
                 intersection = len(individual & historical)
@@ -2131,10 +2296,49 @@ class AdvancedAnalyzer:
             
             avg_score = total_score / len(self.historical_sets)
             
-            # 额外奖励：包含热号和冷号的平衡
+            # 2. AC值约束：偏离目标范围则惩罚
+            ac = self.analyzer.calculate_ac_value(list(individual))
+            ac_penalty = 0
+            if ac < self.ac_min:
+                ac_penalty = (self.ac_min - ac) * 0.15  # 过于规律，惩罚
+            elif ac > self.ac_max:
+                ac_penalty = (ac - self.ac_max) * 0.1   # 过于杂乱，惩罚
+            
+            # 3. 冷热平衡奖励
             hot_cold_bonus = self._hot_cold_balance_bonus(individual)
             
-            return avg_score + hot_cold_bonus
+            # 4. 区间均衡奖励
+            zone_bonus = self._zone_balance_bonus(individual)
+            
+            # 5. 奇偶均衡奖励
+            odd_even_bonus = self._odd_even_balance_bonus(individual)
+            
+            return avg_score + hot_cold_bonus + zone_bonus + odd_even_bonus - ac_penalty
+        
+        def _zone_balance_bonus(self, individual: Set[int]) -> float:
+            """区间分布均衡奖励：1-11, 12-22, 23-33 每个区间至少1个"""
+            zones = [0, 0, 0]
+            for ball in individual:
+                if ball <= 11:
+                    zones[0] += 1
+                elif ball <= 22:
+                    zones[1] += 1
+                else:
+                    zones[2] += 1
+            
+            # 理想分布：2-2-2 或 2-2-1 或 2-1-2 等
+            if all(z >= 1 for z in zones):
+                # 额外奖励更均匀的分布
+                variance = sum((z - 2) ** 2 for z in zones) / 3
+                return 0.25 - variance * 0.05
+            return 0
+        
+        def _odd_even_balance_bonus(self, individual: Set[int]) -> float:
+            """奇偶均衡奖励：3奇3偶最优"""
+            odd_count = sum(1 for b in individual if b % 2 == 1)
+            # 理想是3奇3偶，偏离则递减奖励
+            deviation = abs(odd_count - 3)
+            return max(0, 0.15 - deviation * 0.05)
         
         def _hot_cold_balance_bonus(self, individual: Set[int]) -> float:
             """热冷平衡奖励"""
@@ -2227,27 +2431,57 @@ class AdvancedAnalyzer:
         time_weighted = self.analyze_time_weighted(decay_factor=0.95)
         print(f"   时间加权热号: {[n for n, _ in time_weighted['top_red'][:10]]}")
         
-        # 2. 关联分析
-        print("\n🔗 2. 号码关联分析...")
+        # 2. AC值分析
+        print("\n📐 2. AC值分析（算术复杂度）...")
+        ac_analysis = self.analyze_ac_value_distribution(50)
+        print(f"   近期AC均值: {ac_analysis['avg_ac']:.2f} ± {ac_analysis['ac_std']:.2f}")
+        print(f"   目标AC范围: {ac_analysis['target_ac_range']}")
+        
+        # 3. 熵值分析
+        print("\n🌡️ 3. 熵值趋势分析...")
+        entropy_analysis = self.analyze_entropy_trend([20, 50, 100])
+        phase_desc = {
+            'polarized': '冷热分明（追热/追冷更有效）',
+            'uniform': '均匀分布（平衡策略更有效）',
+            'balanced': '相对均衡',
+            'unknown': '数据不足'
+        }
+        trend_desc = {
+            'rising': '趋向均匀',
+            'falling': '趋向集中',
+            'stable': '保持稳定'
+        }
+        print(f"   当前阶段: {phase_desc.get(entropy_analysis['phase'], entropy_analysis['phase'])}")
+        print(f"   趋势: {trend_desc.get(entropy_analysis['trend'], entropy_analysis['trend'])}")
+        for window, scores in entropy_analysis['entropy_scores'].items():
+            print(f"   近{window}期归一化熵值: {scores['normalized']:.4f}")
+        
+        # 4. 关联分析
+        print("\n🔗 4. 号码关联分析...")
         correlation = self.analyze_number_correlation()
         if correlation['top_pairs']:
             print(f"   高频关联对: {correlation['top_pairs'][:5]}")
         
-        # 3. 模式识别
-        print("\n🎯 3. 模式识别分析...")
+        # 5. 模式识别
+        print("\n🎯 5. 模式识别分析...")
         patterns = self.analyze_patterns(recent_periods=20)
         print(f"   常见奇偶比: {patterns['odd_even_freq'][:3]}")
         print(f"   常见大小比: {patterns['big_small_freq'][:3]}")
         print(f"   平均和值: {patterns['avg_sum']:.1f} ± {patterns['sum_std']:.1f}")
         
-        # 4. 遗传算法优化
-        print("\n🧬 4. 遗传算法优化...")
-        ga = self.GeneticOptimizer(self, population_size=30, generations=20)
+        # 6. 遗传算法优化（传入AC值约束）
+        print("\n🧬 6. 遗传算法优化...")
+        ga = self.GeneticOptimizer(
+            self, population_size=30, generations=20,
+            ac_range=ac_analysis['target_ac_range']
+        )
         ga_result = ga.optimize()
         print(f"   遗传算法推荐: {ga_result}")
         
         return {
             'time_weighted': time_weighted,
+            'ac_analysis': ac_analysis,
+            'entropy_analysis': entropy_analysis,
             'correlation': correlation,
             'patterns': patterns,
             'genetic_result': ga_result
@@ -2262,23 +2496,36 @@ def generate_advanced_prediction(records: List[Dict], rng: random.Random = None)
     # 运行综合分析
     analysis = analyzer.comprehensive_analysis()
     
-    # 整合多种方法生成红球
+    # 整合多种方法生成红球（根据熵值阶段动态调整策略）
     red_candidates = set()
+    entropy_phase = analysis['entropy_analysis']['phase']
     
-    # 1. 加入时间加权高分号码
-    time_top = [n for n, _ in analysis['time_weighted']['top_red'][:8]]
-    red_candidates.update(time_top[:4])
+    # 根据熵值阶段选择不同策略
+    if entropy_phase == 'polarized':
+        # 冷热分明阶段：更依赖时间加权（追热/追冷）
+        time_top = [n for n, _ in analysis['time_weighted']['top_red'][:12]]
+        red_candidates.update(time_top[:6])
+    elif entropy_phase == 'uniform':
+        # 均匀分布阶段：更依赖遗传算法和关联分析
+        red_candidates.update(analysis['genetic_result'][:4])
+        if analysis['correlation']['top_pairs']:
+            for (a, b), count in analysis['correlation']['top_pairs'][:3]:
+                red_candidates.add(a)
+                red_candidates.add(b)
+        # 补充一些时间加权高分号
+        time_top = [n for n, _ in analysis['time_weighted']['top_red'][:6]]
+        red_candidates.update(time_top[:2])
+    else:
+        # 均衡阶段：平衡使用所有策略
+        time_top = [n for n, _ in analysis['time_weighted']['top_red'][:8]]
+        red_candidates.update(time_top[:4])
+        red_candidates.update(analysis['genetic_result'][:2])
+        if analysis['correlation']['top_pairs']:
+            for (a, b), count in analysis['correlation']['top_pairs'][:2]:
+                red_candidates.add(a)
+                red_candidates.add(b)
     
-    # 2. 加入遗传算法结果
-    red_candidates.update(analysis['genetic_result'][:3])
-    
-    # 3. 加入关联分析中的高频对
-    if analysis['correlation']['top_pairs']:
-        for (a, b), count in analysis['correlation']['top_pairs'][:3]:
-            red_candidates.add(a)
-            red_candidates.add(b)
-    
-    # 4. 根据模式补充
+    # 根据模式补充
     patterns = analysis['patterns']
     
     # 根据常见奇偶比调整
@@ -2295,9 +2542,17 @@ def generate_advanced_prediction(records: List[Dict], rng: random.Random = None)
     # 从候选池中选择6个号码，尽量满足约束
     red_balls = sorted(red_candidates)
     if len(red_balls) < 6:
-        # 补充号码
+        # 补充号码（根据熵值阶段选择补充策略）
         all_numbers = set(range(1, 34)) - set(red_balls)
-        red_balls.extend(rng.sample(list(all_numbers), 6 - len(red_balls)))
+        needed = 6 - len(red_balls)
+        if entropy_phase == 'polarized':
+            # 冷热分明：补充时间加权高分号
+            red_scores = {n: s for n, s in analysis['time_weighted']['top_red']}
+            candidates = sorted(all_numbers, key=lambda x: red_scores.get(x, 0), reverse=True)
+            red_balls.extend(candidates[:needed])
+        else:
+            # 均匀/均衡：随机补充保持多样性
+            red_balls.extend(rng.sample(list(all_numbers), needed))
         red_balls = sorted(red_balls[:6])
     elif len(red_balls) > 6:
         # 根据时间加权分数筛选

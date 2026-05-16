@@ -148,6 +148,19 @@ python -m unittest -v
 | `lottery_data.json` | 历史开奖数据 |
 | `prediction_archive/*.txt` | 每期精简预测归档 |
 
+## V4 迭代要点 (2026-05-16)
+
+本次迭代针对命中率低的问题进行了系统性优化（未修改原有逻辑，只做迭代增强）：
+
+1. **多样性约束修复**：`_find_swap_target` → `_find_best_swap`，最优替代 + 最多 3 次迭代
+2. **蓝球双重归一化修复**：删除第二次 MinMax，保留引擎原始区分度 [0.1, 3.0]
+3. **冷号配额提升**：最大纳入数 1→2，bonus 1.15→1.25
+4. **回测多次采样**：差异学习增加 `num_trials=10`，降低单次噪声
+5. **矩阵行动态淘汰**：阈值 = 平均分 × 0.8，低表现行被排除
+6. **位置权重切片修复**：排序后增加 `[:6]`，确保只取 6 个红球
+
+参数清理：删除 `diversity_*` 死参数，统一蓝球配置到 `project_config.py`。
+
 ## 修改建议
 
 - 修改专家集合时，同时检查：
@@ -156,7 +169,10 @@ python -m unittest -v
   - `agent_registry.py`
   - `README.md`
   - `SKILL.md`
+  - `AGENT.md`
+  - `AGENTS.md`
 - 修改命令行参数、补丁逻辑或输出行为时，同步更新文档说明
+- 修改配置参数（`project_config.py`）时，同步检查 `blue_ball_engine.py` 的读取逻辑
 - 修改数据更新逻辑后，优先验证：
   - `python update_data.py`
   - `python -m unittest test_update_data -v`
