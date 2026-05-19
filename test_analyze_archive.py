@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 import analyze_archive
+import predict
 
 
 class AnalyzeArchiveTests(unittest.TestCase):
@@ -396,6 +397,87 @@ class AnalyzeArchiveTests(unittest.TestCase):
             with open(final_latest, "r", encoding="utf-8") as f:
                 latest_payload = json.load(f)
             self.assertIn("pool_params", latest_payload)
+
+    def test_build_experiment_comparison_contains_uplift(self):
+        report = analyze_archive.build_experiment_comparison(
+            {
+                "team_cover": {
+                    "samples": 12,
+                    "avg_ticket_score": 1.80,
+                    "best_of_5_avg_score": 3.20,
+                    "best_of_5_hit_rate_ge2": 0.60,
+                    "best_of_5_hit_rate_ge3": 0.25,
+                    "blue_pool_hit_rate": 0.33,
+                    "final_blue_hit_rate": 0.18,
+                    "avg_overlap": 2.40,
+                },
+                "team": {
+                    "samples": 12,
+                    "avg_ticket_score": 1.55,
+                    "best_of_5_avg_score": 2.90,
+                    "best_of_5_hit_rate_ge2": 0.52,
+                    "best_of_5_hit_rate_ge3": 0.20,
+                    "blue_pool_hit_rate": 0.30,
+                    "final_blue_hit_rate": 0.15,
+                    "avg_overlap": 2.80,
+                },
+                "conditional_random": {
+                    "samples": 12,
+                    "avg_ticket_score": 1.40,
+                    "best_of_5_avg_score": 2.50,
+                    "best_of_5_hit_rate_ge2": 0.48,
+                    "best_of_5_hit_rate_ge3": 0.16,
+                    "blue_pool_hit_rate": 0.24,
+                    "final_blue_hit_rate": 0.10,
+                    "avg_overlap": 3.10,
+                },
+            }
+        )
+        self.assertIn("comparison", report)
+        self.assertIn("team_cover_vs_random_uplift", report["comparison"])
+        self.assertAlmostEqual(
+            report["comparison"]["team_cover_vs_random_uplift"]["avg_ticket_score"],
+            0.4,
+        )
+        self.assertAlmostEqual(
+            report["comparison"]["team_vs_random_uplift"]["best_of_5_hit_rate_ge2"],
+            0.04,
+        )
+
+    def test_build_experiment_comparison_preserves_predict_contract(self):
+        raw_report = {
+            "team_cover": {"avg_ticket_score": 1.8, "avg_overlap": 2.4},
+            "team": {"avg_ticket_score": 1.5, "avg_overlap": 2.8},
+            "conditional_random": {"avg_ticket_score": 1.4, "avg_overlap": 3.1},
+        }
+        expected_comparison = predict.build_experiment_comparison_payload(
+            raw_report["team_cover"],
+            raw_report["team"],
+            raw_report["conditional_random"],
+        )
+        report = analyze_archive.build_experiment_comparison(
+            {
+                **raw_report,
+                "comparison": expected_comparison,
+            }
+        )
+        self.assertEqual(report["comparison"], expected_comparison)
+
+    def test_render_experiment_report_includes_cover_uplift(self):
+        report = analyze_archive.render_experiment_report(
+            {
+                "team_cover": {"avg_ticket_score": 1.80, "best_of_5_hit_rate_ge2": 0.60, "avg_overlap": 2.40},
+                "team": {"avg_ticket_score": 1.55, "best_of_5_hit_rate_ge2": 0.52, "avg_overlap": 2.80},
+                "conditional_random": {"avg_ticket_score": 1.40, "best_of_5_hit_rate_ge2": 0.48, "avg_overlap": 3.10},
+                "comparison": {
+                    "team_cover_vs_random_uplift": {"avg_ticket_score": 0.40, "best_of_5_hit_rate_ge2": 0.12},
+                    "team_vs_random_uplift": {"avg_ticket_score": 0.15, "best_of_5_hit_rate_ge2": 0.04},
+                },
+            }
+        )
+        self.assertIn("team_cover_vs_random_uplift", report)
+        self.assertIn("avg_ticket_score=0.400000", report)
+        self.assertIn("conditional_random", report)
 
 
 if __name__ == "__main__":

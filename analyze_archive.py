@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from agent_registry import VALID_AGENTS
 from project_config import GLOBAL_CONFIG
 import feature_importance
+import predict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -518,6 +519,63 @@ def write_latest_param_patch(source_patch_path: str, latest_patch_path: str = "c
     return latest_patch_path
 
 
+def _experiment_uplift_metric(metric: str, experiment: Dict[str, object], baseline: Dict[str, object]) -> float:
+    experiment_value = float(experiment.get(metric, 0.0))
+    baseline_value = float(baseline.get(metric, 0.0))
+    if metric == "avg_overlap":
+        return round(baseline_value - experiment_value, 6)
+    return round(experiment_value - baseline_value, 6)
+
+
+def build_experiment_comparison(report: Dict[str, object]) -> Dict[str, object]:
+    existing_comparison = report.get("comparison")
+    if isinstance(existing_comparison, dict) and existing_comparison:
+        return dict(report)
+    team_cover = report.get("team_cover", {}) if isinstance(report.get("team_cover", {}), dict) else {}
+    team = report.get("team", {}) if isinstance(report.get("team", {}), dict) else {}
+    conditional_random = (
+        report.get("conditional_random", {})
+        if isinstance(report.get("conditional_random", {}), dict)
+        else {}
+    )
+    merged = dict(report)
+    merged["comparison"] = predict.build_experiment_comparison_payload(
+        team_cover,
+        team,
+        conditional_random,
+    )
+    return merged
+
+
+def render_experiment_report(report: Dict[str, object]) -> str:
+    normalized = build_experiment_comparison(report)
+    lines = ["实验回测三路对照:"]
+    for key in ["team_cover", "team", "conditional_random"]:
+        metrics = normalized.get(key, {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        lines.append(
+            f"{key}: "
+            f"avg_ticket_score={float(metrics.get('avg_ticket_score', 0.0)):.6f}, "
+            f"best_of_5_hit_rate_ge2={float(metrics.get('best_of_5_hit_rate_ge2', 0.0)):.6f}, "
+            f"avg_overlap={float(metrics.get('avg_overlap', 0.0)):.6f}"
+        )
+    comparison = normalized.get("comparison", {})
+    if not isinstance(comparison, dict):
+        comparison = {}
+    for key in ["team_cover_vs_random_uplift", "team_vs_random_uplift"]:
+        uplift = comparison.get(key, {})
+        if not isinstance(uplift, dict):
+            uplift = {}
+        lines.append(
+            f"{key}: "
+            f"avg_ticket_score={float(uplift.get('avg_ticket_score', 0.0)):.6f}, "
+            f"best_of_5_hit_rate_ge2={float(uplift.get('best_of_5_hit_rate_ge2', 0.0)):.6f}, "
+            f"avg_overlap={float(uplift.get('avg_overlap', 0.0)):.6f}"
+        )
+    return "\n".join(lines)
+
+
 def export_reports(
     export_prefix: str,
     all_time_ranking: List[Dict[str, object]],
@@ -527,6 +585,7 @@ def export_reports(
     weight_adjustments: Optional[List[Dict[str, object]]] = None,
     matrix_ranking: Optional[List[Dict[str, object]]] = None,
     records: Optional[List[Dict[str, object]]] = None,
+    experiment_report: Optional[Dict[str, object]] = None,
 ) -> Dict[str, str]:
     base = export_prefix
     root, ext = os.path.splitext(base)
@@ -545,6 +604,8 @@ def export_reports(
         "matrix_ranking": matrix_ranking or [],
         "suggestions": suggestions,
     }
+    if experiment_report:
+        payload["experiment_report"] = build_experiment_comparison(experiment_report)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 

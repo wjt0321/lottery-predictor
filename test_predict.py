@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 import json
@@ -548,6 +549,454 @@ class PredictFlowTests(unittest.TestCase):
             predict.CONFIG.blue_cold_chase_cap,
         )
 
+    def test_project_config_exposes_team_cover_defaults(self):
+        runtime = predict.CONFIG.to_runtime_config()
+        self.assertIn("cover_mode", runtime)
+        self.assertEqual(runtime["cover_mode"]["ticket_count"], predict.CONFIG.team_ticket_count)
+        self.assertEqual(runtime["cover_mode"]["candidate_pool_size"], predict.CONFIG.core_red_pool_size)
+        self.assertEqual(runtime["cover_mode"]["blue_bucket_size"], predict.CONFIG.core_blue_pool_size)
+        self.assertIn("score_weights", runtime["cover_mode"])
+        self.assertEqual(runtime["matrix_params"]["preferred_rows"], [])
+
+    def test_predict_help_includes_team_cover_mode(self):
+        project_root = os.path.abspath(os.path.dirname(__file__) or ".")
+        result = subprocess.run(
+            [sys.executable, "predict.py", "--help"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        output = f"{result.stdout}\n{result.stderr}"
+        self.assertIn("team-cover", output)
+        self.assertIn("--team-cover-backtest", output)
+
+    def test_team_cover_backtest_report_contains_three_way_comparison(self):
+        records = self._build_mock_records(72)
+        report = predict.team_cover_backtest_report(records, cycles=12, seed=42)
+        self.assertIn("team_cover", report)
+        self.assertIn("team", report)
+        self.assertIn("conditional_random", report)
+        self.assertIn("comparison", report)
+        self.assertIn("team_cover_vs_random_uplift", report["comparison"])
+        self.assertIn("team_vs_random_uplift", report["comparison"])
+        self.assertIn("avg_overlap", report["team_cover"])
+        self.assertIn("avg_overlap", report["conditional_random"])
+
+    def test_team_cover_backtest_report_is_deterministic_with_seed(self):
+        records = self._build_mock_records(72)
+        first = predict.team_cover_backtest_report(records, cycles=8, seed=42)
+        second = predict.team_cover_backtest_report(records, cycles=8, seed=42)
+        self.assertEqual(first, second)
+
+    def test_team_cover_backtest_report_aggregates_three_way_metrics(self):
+        records = self._build_mock_records(72)
+        report = predict.team_cover_backtest_report(records, cycles=10, seed=42)
+        for key in ["team_cover", "team", "conditional_random"]:
+            self.assertEqual(report[key]["samples"], 10)
+        for metric in [
+            "avg_ticket_score",
+            "best_of_5_avg_score",
+            "best_of_5_hit_rate_ge2",
+            "best_of_5_hit_rate_ge3",
+            "blue_pool_hit_rate",
+            "final_blue_hit_rate",
+            "avg_overlap",
+        ]:
+            self.assertIn(metric, report["conditional_random"])
+        self.assertAlmostEqual(
+            report["comparison"]["team_cover_vs_random_uplift"]["avg_ticket_score"],
+            round(report["team_cover"]["avg_ticket_score"] - report["conditional_random"]["avg_ticket_score"], 6),
+        )
+        self.assertAlmostEqual(
+            report["comparison"]["team_vs_random_uplift"]["best_of_5_hit_rate_ge2"],
+            round(report["team"]["best_of_5_hit_rate_ge2"] - report["conditional_random"]["best_of_5_hit_rate_ge2"], 6),
+        )
+        self.assertAlmostEqual(
+            report["comparison"]["team_cover_vs_random_uplift"]["avg_overlap"],
+            round(report["conditional_random"]["avg_overlap"] - report["team_cover"]["avg_overlap"], 6),
+        )
+
+    def test_team_cover_backtest_report_skips_unaligned_samples(self):
+        records = self._build_mock_records(72)
+        original_generate_team = predict.generate_final_team_tickets
+        call_state = {"count": 0}
+
+        def flaky_generate_team(*args, **kwargs):
+            call_state["count"] += 1
+            if call_state["count"] == 1:
+                return []
+            return original_generate_team(*args, **kwargs)
+
+        with mock.patch.object(predict, "generate_final_team_tickets", side_effect=flaky_generate_team):
+            report = predict.team_cover_backtest_report(records, cycles=2, seed=42)
+
+        self.assertEqual(report["team"]["samples"], 1)
+        self.assertEqual(report["team_cover"]["samples"], 1)
+        self.assertEqual(report["conditional_random"]["samples"], 1)
+
+    def test_generate_conditional_random_tickets_uses_fixed_baseline_source(self):
+        snapshot = {
+            "red_ranked": list(range(1, 15)),
+            "red_scores": {n: 2.0 - (n * 0.05) for n in range(1, 15)},
+            "red_meta": {
+                n: {"zone": 1, "parity": n % 2, "agents": ["hot", "cold"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [1, 2, 3, 4, 5, 6],
+            "blue_scores": {n: 2.0 - n * 0.1 for n in range(1, 7)},
+            "blue_buckets": {"main": [1, 2], "explore": [3, 4], "reversion": [5, 6]},
+            "valid_agents": ["hot", "cold", "zone"],
+        }
+        tickets = predict.generate_conditional_random_tickets(
+            snapshot,
+            runtime_config={"cover_mode": {"ticket_count": 3}},
+            seed=42,
+        )
+        self.assertEqual(len(tickets), 3)
+        self.assertTrue(all(ticket["sources"] == [predict.CONDITIONAL_RANDOM_SOURCE] for ticket in tickets))
+
+    def test_main_dispatches_team_cover_backtest(self):
+        records = self._build_mock_records(72)
+        data = {
+            "records": records,
+            "metadata": {"last_updated": "2026-05-19 10:00:00"},
+        }
+        report = {
+            "team_cover": {"samples": 12, "avg_ticket_score": 1.5},
+            "team": {"samples": 12, "avg_ticket_score": 1.2},
+            "conditional_random": {"samples": 12, "avg_ticket_score": 1.0},
+            "comparison": {"team_cover_vs_random_uplift": {"avg_ticket_score": 0.5}},
+        }
+        with mock.patch.object(sys, "argv", ["predict.py", "--team-cover-backtest", "--backtest-cycles", "12", "--seed", "42"]), \
+             mock.patch.object(predict, "load_data", return_value=data), \
+             mock.patch.object(predict, "is_data_stale", return_value=(False, {})), \
+             mock.patch.object(predict, "analyze_hot_cold", return_value={"hot_red": list(range(1, 11)), "cold_red": list(range(24, 34))}), \
+             mock.patch.object(predict, "resolve_weight_patch_path", return_value=(None, "none")), \
+             mock.patch.object(predict, "load_weight_patch", return_value=None), \
+             mock.patch.object(predict, "resolve_runtime_config", return_value={"cover_mode": {"ticket_count": 5}}), \
+             mock.patch.object(predict, "team_cover_backtest_report", return_value=report) as mocked_report, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:
+            predict.main()
+
+        mocked_report.assert_called_once()
+        called_args, called_kwargs = mocked_report.call_args
+        self.assertEqual(called_args[0], records)
+        self.assertEqual(called_kwargs["cycles"], 12)
+        self.assertEqual(called_kwargs["seed"], 42)
+        self.assertEqual(called_kwargs["runtime_config"], {"cover_mode": {"ticket_count": 5}})
+        self.assertIn("progress_callback", called_kwargs)
+        output = fake_stdout.getvalue()
+        self.assertIn("team-cover 对照回测", output)
+        self.assertIn("实验模式", output)
+        self.assertIn("条件随机基准", output)
+        self.assertNotIn("未实现", output)
+
+    def test_main_team_cover_mode_outputs_tickets_and_archives_prediction(self):
+        records = self._build_mock_records(72)
+        data = {
+            "records": records,
+            "metadata": {"last_updated": "2026-05-19 10:00:00"},
+        }
+        cover_tickets = [
+            {
+                "red": [1, 2, 3, 4, 5, 6],
+                "blue": 7,
+                "sources": ["hot", "zone"],
+                "explain": "cover ticket 1",
+                "explain_json": {"cover_strategy": {"ticket_index": 1}},
+            },
+            {
+                "red": [8, 9, 10, 11, 12, 13],
+                "blue": 14,
+                "sources": ["cold", "missing"],
+                "explain": "cover ticket 2",
+                "explain_json": {"cover_strategy": {"ticket_index": 2}},
+            },
+        ]
+        with mock.patch.object(sys, "argv", ["predict.py", "--mode", "team-cover", "--seed", "42"]), \
+             mock.patch.object(predict, "load_data", return_value=data), \
+             mock.patch.object(predict, "is_data_stale", return_value=(False, {})), \
+             mock.patch.object(predict, "analyze_hot_cold", return_value={"hot_red": list(range(1, 11)), "cold_red": list(range(24, 34))}), \
+             mock.patch.object(predict, "resolve_runtime_config", return_value={"cover_mode": {"ticket_count": 5}}), \
+             mock.patch.object(predict, "next_target_period", return_value="2099001"), \
+             mock.patch.object(predict, "next_draw_date_str", return_value="2099-01-01"), \
+             mock.patch.object(predict, "train_lead_agent", return_value={"weights": {"hot": 1.0}, "diff_scores": {"hot": 0.0}}), \
+             mock.patch.object(predict, "build_expert_teams", return_value={"hot": {"proposals": [], "error": ""}}), \
+             mock.patch.object(predict, "build_cover_candidate_snapshot", return_value={"red_ranked": list(range(1, 15))}) as mocked_snapshot, \
+             mock.patch.object(predict, "generate_team_cover_tickets", return_value=cover_tickets) as mocked_generate, \
+             mock.patch.object(
+                 predict,
+                 "build_archive_lead_summary",
+                 return_value="factor=1.00;mode=team_cover;patch_source=none;agents=hot;report=覆盖实验",
+             ) as mocked_summary, \
+             mock.patch.object(predict, "save_compact_prediction", return_value="prediction_archive/2099001.txt") as mocked_archive, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:
+            predict.main()
+
+        mocked_snapshot.assert_called_once()
+        mocked_generate.assert_called_once_with(
+            {"red_ranked": list(range(1, 15))},
+            runtime_config={"cover_mode": {"ticket_count": 5}},
+            seed=42,
+        )
+        mocked_summary.assert_called_once()
+        mocked_archive.assert_called_once_with(
+            "2099001",
+            cover_tickets,
+            "factor=1.00;mode=team_cover;patch_source=none;agents=hot;report=覆盖实验",
+        )
+        output = fake_stdout.getvalue()
+        self.assertIn("第1注", output)
+        self.assertIn("第2注", output)
+        self.assertIn("已归档本期精简预测", output)
+
+    def test_build_cover_candidate_snapshot_returns_structured_scores(self):
+        teams = {
+            "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}], "error": ""},
+            "cold": {"proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 2}], "error": ""},
+            "zone": {"proposals": [{"red": [1, 7, 13, 19, 25, 31], "blue": 3}], "error": ""},
+        }
+        lead_model = {
+            "weights": {"hot": 0.4, "cold": 0.3, "zone": 0.3},
+            "diff_scores": {"hot": 0.0, "cold": 0.0, "zone": 0.0},
+        }
+        snapshot = predict.build_cover_candidate_snapshot(teams, lead_model, diff_factor=1.0)
+        self.assertIn("red_ranked", snapshot)
+        self.assertIn("red_meta", snapshot)
+        self.assertIn("blue_ranked", snapshot)
+        self.assertTrue(snapshot["red_ranked"])
+        self.assertIn("agents", snapshot["red_meta"][1])
+        self.assertIn("blue_scores", snapshot)
+
+    def test_build_cover_candidate_snapshot_adds_blue_buckets(self):
+        records = self._build_mock_records(40)
+        teams = predict.build_expert_teams(records, tickets=2, seed=7)
+        lead_model = predict.train_lead_agent(records, learning_cycles=12)
+        snapshot = predict.build_cover_candidate_snapshot(
+            teams,
+            lead_model,
+            diff_factor=1.0,
+            runtime_config=predict.resolve_runtime_config(),
+        )
+        self.assertIn("blue_buckets", snapshot)
+        self.assertIn("main", snapshot["blue_buckets"])
+        self.assertIn("explore", snapshot["blue_buckets"])
+        self.assertIn("reversion", snapshot["blue_buckets"])
+
+    def test_build_cover_candidate_snapshot_prefers_engine_pool_and_cold_chase_for_blue_buckets(self):
+        teams = {
+            "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 16}], "error": ""},
+            "cold": {"proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 15}], "error": ""},
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+        records = self._build_mock_records(40)
+
+        class FakeBlueBallEngine:
+            def __init__(self, _records, config=None):
+                self.config = config or {}
+
+            def predict(self, pool_size=6):
+                _ = pool_size
+                return {
+                    "pool": [11, 9, 7, 5, 3, 1],
+                    "scores": {n: 2.0 - n * 0.05 for n in range(1, 17)},
+                    "details": {"next_odd_prob": 0.55},
+                    "cold_chase": [(5, 22), (3, 19), (16, 18)],
+                }
+
+        with mock.patch.object(predict, "BlueBallEngine", FakeBlueBallEngine):
+            snapshot = predict.build_cover_candidate_snapshot(
+                teams,
+                lead_model,
+                diff_factor=1.0,
+                records=records,
+                runtime_config=predict.resolve_runtime_config(),
+            )
+
+        self.assertEqual(snapshot["blue_buckets"]["main"], [11, 9])
+        self.assertEqual(snapshot["blue_buckets"]["explore"], [5, 3])
+        self.assertEqual(snapshot["blue_buckets"]["reversion"], [7, 1])
+
+    def test_generate_team_cover_tickets_returns_five_diversified_rows(self):
+        snapshot = {
+            "red_ranked": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            "red_scores": {n: 2.0 - (n * 0.05) for n in range(1, 15)},
+            "red_meta": {
+                n: {"zone": 1 if n <= 5 else 2 if n <= 10 else 3, "parity": n % 2, "agents": ["hot"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [1, 2, 3, 4, 5, 6],
+            "blue_scores": {n: 2.0 - n * 0.1 for n in range(1, 7)},
+        }
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config=predict.resolve_runtime_config(),
+            seed=42,
+        )
+        self.assertEqual(len(tickets), 5)
+        overlaps = [len(set(tickets[0]["red"]) & set(ticket["red"])) for ticket in tickets[1:]]
+        self.assertTrue(all(overlap <= 4 for overlap in overlaps))
+        self.assertTrue(all("cover_strategy" in ticket["explain_json"] for ticket in tickets))
+        self.assertTrue(all("focus" in ticket["explain_json"]["cover_strategy"] for ticket in tickets))
+
+    def test_generate_team_cover_tickets_prefers_high_score_combo_under_overlap_cap(self):
+        snapshot = {
+            "red_ranked": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+            "red_scores": {
+                1: 10.0,
+                2: 9.0,
+                3: 8.0,
+                4: 7.0,
+                5: 6.0,
+                6: 5.0,
+                7: 4.9,
+                8: 4.8,
+                9: 1.0,
+                10: 1.0,
+                11: 1.0,
+                12: 1.0,
+                13: 0.9,
+                14: 0.8,
+            },
+            "red_meta": {
+                n: {"zone": 1 if n <= 5 else 2 if n <= 10 else 3, "parity": n % 2, "agents": ["hot"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [1, 2, 3],
+            "blue_scores": {1: 2.0, 2: 1.5, 3: 1.0},
+        }
+
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config={"cover_mode": {"ticket_count": 2}},
+            seed=42,
+        )
+
+        self.assertEqual(tickets[0]["red"], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(tickets[1]["red"], [1, 2, 3, 4, 7, 8])
+
+    def test_generate_team_cover_tickets_spreads_blue_buckets(self):
+        snapshot = {
+            "red_ranked": list(range(1, 15)),
+            "red_scores": {n: 2.0 - (n * 0.05) for n in range(1, 15)},
+            "red_meta": {
+                n: {"zone": 1, "parity": n % 2, "agents": ["hot"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [1, 2, 3, 4, 5, 6],
+            "blue_scores": {n: 2.0 - n * 0.1 for n in range(1, 7)},
+            "blue_buckets": {"main": [1, 2], "explore": [3, 4], "reversion": [5, 6]},
+        }
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config=predict.resolve_runtime_config(),
+            seed=42,
+        )
+        blues = [ticket["blue"] for ticket in tickets]
+        self.assertGreaterEqual(len(set(blues)), 4)
+        self.assertTrue(all("blue_bucket" in ticket["explain_json"]["cover_strategy"] for ticket in tickets))
+
+    def test_generate_team_cover_tickets_keeps_bucket_priority_without_blue_scores(self):
+        snapshot = {
+            "red_ranked": list(range(1, 15)),
+            "red_scores": {n: 2.0 - (n * 0.05) for n in range(1, 15)},
+            "red_meta": {
+                n: {"zone": 1, "parity": n % 2, "agents": ["hot"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [6, 4, 2, 5, 3, 1],
+            "blue_scores": {},
+            "blue_buckets": {"main": [6, 4], "explore": [5, 3], "reversion": [2, 1]},
+        }
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config={"cover_mode": {"ticket_count": 3}},
+            seed=42,
+        )
+        self.assertEqual([ticket["blue"] for ticket in tickets], [6, 5, 2])
+
+    def test_generate_team_cover_tickets_fallback_prefers_unused_blue_from_other_bucket(self):
+        snapshot = {
+            "red_ranked": list(range(1, 15)),
+            "red_scores": {n: 2.0 - (n * 0.05) for n in range(1, 15)},
+            "red_meta": {
+                n: {"zone": 1, "parity": n % 2, "agents": ["hot"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [6, 5, 4, 2, 1],
+            "blue_scores": {6: 1.6, 5: 1.5, 4: 1.4, 2: 1.2, 1: 1.0},
+            "blue_buckets": {"main": [6], "explore": [5, 4], "reversion": [2]},
+        }
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config={"cover_mode": {"ticket_count": 4}},
+            seed=42,
+        )
+        self.assertEqual([ticket["blue"] for ticket in tickets[:4]], [6, 5, 2, 4])
+        self.assertEqual(tickets[3]["explain_json"]["cover_strategy"]["blue_bucket"], "explore")
+        self.assertEqual(tickets[3]["explain_json"]["cover_strategy"]["selected_blue"], 4)
+
+    def test_generate_team_cover_tickets_keeps_bucket_priority_when_some_blue_scores_missing(self):
+        snapshot = {
+            "red_ranked": list(range(1, 15)),
+            "red_scores": {n: 2.0 - (n * 0.05) for n in range(1, 15)},
+            "red_meta": {
+                n: {"zone": 1, "parity": n % 2, "agents": ["hot"]}
+                for n in range(1, 15)
+            },
+            "blue_ranked": [6, 4, 2, 5, 3, 1],
+            "blue_scores": {4: 1.4},
+            "blue_buckets": {"main": [6, 4], "explore": [5, 3], "reversion": [2, 1]},
+        }
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config={"cover_mode": {"ticket_count": 3}},
+            seed=42,
+        )
+        self.assertEqual([ticket["blue"] for ticket in tickets], [6, 5, 2])
+
+    def test_generate_team_cover_tickets_uses_structure_bonus_when_scores_are_close(self):
+        snapshot = {
+            "red_ranked": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 23, 24],
+            "red_scores": {
+                1: 1.50,
+                2: 1.49,
+                3: 1.48,
+                4: 1.47,
+                5: 1.46,
+                6: 1.45,
+                7: 1.00,
+                8: 1.00,
+                9: 1.00,
+                10: 1.00,
+                11: 1.00,
+                12: 1.00,
+                23: 0.96,
+                24: 0.95,
+            },
+            "red_meta": {
+                n: {"zone": 1 if n <= 11 else 2 if n <= 22 else 3, "parity": n % 2, "agents": ["hot"]}
+                for n in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 23, 24]
+            },
+            "blue_ranked": [1, 2, 3],
+            "blue_scores": {1: 2.0, 2: 1.5, 3: 1.0},
+        }
+
+        tickets = predict.generate_team_cover_tickets(
+            snapshot,
+            runtime_config={"cover_mode": {"ticket_count": 2, "candidate_pool_size": 14}},
+            seed=42,
+        )
+
+        self.assertEqual(tickets[0]["red"], [1, 2, 3, 4, 5, 6])
+        self.assertTrue(any(ball >= 23 for ball in tickets[1]["red"]))
+
     def test_load_param_patch_can_override_blue_params(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             patch_path = os.path.join(temp_dir, "param_patch.latest.json")
@@ -774,6 +1223,16 @@ class PredictFlowTests(unittest.TestCase):
         lead_report = {"healthy_agents": ["hot", "cold"], "archive_summary": "策略风格=保守"}
         summary = predict.build_archive_lead_summary(1.0, lead_report, patch_source="default")
         self.assertIn("patch_source=default", summary)
+
+    def test_build_archive_lead_summary_supports_team_cover_mode(self):
+        lead_report = {"healthy_agents": ["hot", "cold"], "archive_summary": "策略风格=覆盖"}
+        summary = predict.build_archive_lead_summary(
+            1.0,
+            lead_report,
+            patch_source="default",
+            mode="team_cover",
+        )
+        self.assertIn("mode=team_cover", summary)
 
 
 if __name__ == "__main__":

@@ -84,7 +84,7 @@ class ProjectConfig:
             },
             "matrix_params": {
                 "matrix_type": self.rotation_matrix_type,
-                "preferred_rows": list(range(1, row_count + 1)),
+                "preferred_rows": [],
                 "row_weights": {str(i): 1.0 / row_count for i in range(1, row_count + 1)},
             },
             "blue_params": {
@@ -97,6 +97,17 @@ class ProjectConfig:
                 "amplitude_window": self.blue_amplitude_window,
                 "heat_window": self.blue_heat_window,
                 "cold_chase_cap": self.blue_cold_chase_cap,
+            },
+            "cover_mode": {
+                "ticket_count": self.team_ticket_count,
+                "candidate_pool_size": self.core_red_pool_size,
+                "blue_bucket_size": self.core_blue_pool_size,
+                "score_weights": {
+                    "red_hit_ge2": 0.40,
+                    "red_hit_ge3": 0.25,
+                    "blue_pool_hit": 0.20,
+                    "diversity": 0.15,
+                },
             },
         }
 

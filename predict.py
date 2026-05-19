@@ -10,6 +10,7 @@ import random
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+from itertools import combinations
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 import math
 
@@ -44,6 +45,16 @@ CORE_BLUE_POOL_SIZE = CONFIG.core_blue_pool_size
 ROTATION_MATRIX_TYPE = CONFIG.rotation_matrix_type
 ROTATION_MATRIX_ROWS = CONFIG.rotation_matrix_rows
 DEFAULT_RUNTIME_CONFIG = CONFIG.to_runtime_config()
+CONDITIONAL_RANDOM_SOURCE = "conditional_random_baseline"
+BACKTEST_UPLIFT_METRICS = (
+    "avg_ticket_score",
+    "best_of_5_avg_score",
+    "best_of_5_hit_rate_ge2",
+    "best_of_5_hit_rate_ge3",
+    "blue_pool_hit_rate",
+    "final_blue_hit_rate",
+    "avg_overlap",
+)
 
 
 def load_data():
@@ -680,10 +691,18 @@ def _position_weight_factor(ball: int, pos_weights: Optional[List[Dict[int, floa
     return sum(factors) / len(factors)
 
 
-def build_archive_lead_summary(diff_factor: float, lead_report: Dict[str, object], patch_source: str) -> str:
+def build_archive_lead_summary(
+    diff_factor: float,
+    lead_report: Dict[str, object],
+    patch_source: str,
+    mode: str = "team",
+) -> str:
     healthy_agents = lead_report.get("healthy_agents", []) or []
     archive_summary = lead_report.get("archive_summary", "")
-    return f"factor={diff_factor:.2f};mode=team;patch_source={patch_source};agents={','.join(healthy_agents)};report={archive_summary}"
+    return (
+        f"factor={diff_factor:.2f};mode={mode};patch_source={patch_source};"
+        f"agents={','.join(healthy_agents)};report={archive_summary}"
+    )
 
 
 def _window_agent_performance(
@@ -1175,6 +1194,338 @@ def resolve_team_ticket_count(_requested: int) -> int:
     return TEAM_TICKET_COUNT
 
 
+def _build_cover_blue_buckets(
+    blue_ranked: List[int],
+    blue_scores: Dict[int, float],
+    records: Optional[List[Dict]] = None,
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> Dict[str, List[int]]:
+    """将蓝球候选按覆盖用途拆分成主攻/探索/回补三个桶。"""
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    bucket_size = int(runtime.get("cover_mode", {}).get("blue_bucket_size", CORE_BLUE_POOL_SIZE))
+    ordered = list(blue_ranked[:max(0, bucket_size)])
+    engine_pool: List[int] = []
+    cold_chase: List[int] = []
+
+    if records and len(records) >= 5:
+        try:
+            engine = BlueBallEngine(records, config=_runtime_blue_params(runtime))
+            engine_result = engine.predict(pool_size=max(bucket_size, 6))
+            engine_pool = [int(n) for n in engine_result.get("pool", []) if 1 <= int(n) <= 16]
+            cold_chase = [
+                int(num) for num, _miss in engine_result.get("cold_chase", [])
+                if 1 <= int(num) <= 16
+            ]
+        except Exception:
+            engine_pool = []
+            cold_chase = []
+
+    prioritized = engine_pool or ordered
+    if not prioritized:
+        return {"main": [], "explore": [], "reversion": []}
+
+    main = prioritized[:2]
+    explore = [n for n in cold_chase if n not in main][:2]
+
+    remaining = [n for n in prioritized if n not in main and n not in explore]
+    if len(remaining) < 2:
+        fallback_order = ordered or sorted(blue_scores, key=lambda n: (-float(blue_scores.get(n, 0.0)), n))
+        for number in fallback_order:
+            if number not in main and number not in explore and number not in remaining:
+                remaining.append(number)
+            if len(remaining) >= 2:
+                break
+    reversion = remaining[:2]
+
+    return {
+        "main": main,
+        "explore": explore,
+        "reversion": reversion,
+    }
+
+
+def build_cover_candidate_snapshot(
+    teams: Dict[str, Dict[str, object]],
+    lead_model: Dict[str, Dict[str, float]],
+    diff_factor: float,
+    records: Optional[List[Dict]] = None,
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """整理实验模式候选分布，弱化热点共识，保留结构标签。"""
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    pool_size = int(runtime.get("cover_mode", {}).get("candidate_pool_size", CORE_RED_POOL_SIZE))
+    blue_pool_size = int(runtime.get("cover_mode", {}).get("blue_bucket_size", CORE_BLUE_POOL_SIZE))
+    ticket_decay_step = float(runtime.get("fusion_params", {}).get("ticket_decay_step", 0.08))
+    min_ticket_decay = float(runtime.get("fusion_params", {}).get("min_ticket_decay", 0.65))
+
+    red_scores = {i: 0.0 for i in range(1, 34)}
+    red_meta = {
+        i: {
+            "agents": set(),
+            "zone": 1 if i <= 11 else 2 if i <= 22 else 3,
+            "parity": i % 2,
+        }
+        for i in range(1, 34)
+    }
+    blue_scores = {i: 0.0 for i in range(1, 17)}
+    valid_agents: List[str] = []
+
+    for agent, payload in teams.items():
+        proposals = payload.get("proposals", [])
+        if not proposals:
+            continue
+        valid_agents.append(agent)
+        base_weight = max(0.0, lead_model.get("weights", {}).get(agent, 0.0) * diff_factor)
+        diff_bonus = max(0.0, lead_model.get("diff_scores", {}).get(agent, 0.0)) * 0.2
+        final_weight = base_weight * (1 + diff_bonus)
+        for proposal_index, proposal in enumerate(proposals):
+            ticket_decay = max(min_ticket_decay, 1.0 - proposal_index * ticket_decay_step)
+            weighted_score = final_weight * ticket_decay
+            for red in proposal.get("red", []):
+                if 1 <= int(red) <= 33:
+                    red_scores[int(red)] += weighted_score
+                    red_meta[int(red)]["agents"].add(agent)
+            blue = int(proposal.get("blue", 0) or 0)
+            if 1 <= blue <= 16:
+                blue_scores[blue] += weighted_score
+
+    for number in range(1, 34):
+        meta = red_meta[number]
+        agent_count = len(meta["agents"])
+        if red_scores[number] <= 0:
+            meta["agents"] = []
+            continue
+        if agent_count == 1:
+            red_scores[number] *= 1.05
+        elif agent_count >= 3:
+            red_scores[number] *= 0.96
+        meta["agents"] = sorted(meta["agents"])
+
+    ranked_red = sorted(red_scores.items(), key=lambda item: (-item[1], item[0]))
+    ranked_blue = sorted(blue_scores.items(), key=lambda item: (-item[1], item[0]))
+    red_ranked = [n for n, score in ranked_red if score > 0][:pool_size]
+    blue_ranked = [n for n, score in ranked_blue if score > 0][:blue_pool_size]
+
+    return {
+        "red_ranked": red_ranked,
+        "red_scores": {n: round(float(red_scores[n]), 6) for n in red_ranked},
+        "red_meta": {n: red_meta[n] for n in red_ranked},
+        "blue_ranked": blue_ranked,
+        "blue_scores": {n: round(float(blue_scores[n]), 6) for n in blue_ranked},
+        "blue_buckets": _build_cover_blue_buckets(
+            blue_ranked,
+            blue_scores,
+            records=records,
+            runtime_config=runtime,
+        ),
+        "valid_agents": sorted(valid_agents),
+    }
+
+
+def _max_cover_overlap(candidate_red: List[int], tickets: List[Dict[str, object]]) -> int:
+    if not tickets:
+        return 0
+    current = set(candidate_red)
+    return max(len(current & set(ticket.get("red", []))) for ticket in tickets)
+
+
+def _score_cover_red_combo(
+    candidate_red: List[int],
+    red_scores: Dict[int, float],
+    red_meta: Dict[int, Dict[str, object]],
+    tickets: List[Dict[str, object]],
+    usage_counts: Counter,
+) -> float:
+    base_score = sum(float(red_scores.get(ball, 0.0)) for ball in candidate_red)
+    overlap_penalty = 0.0
+    for ticket in tickets:
+        overlap = len(set(candidate_red) & set(ticket.get("red", [])))
+        overlap_penalty += overlap * 1.25
+        if overlap > 4:
+            overlap_penalty += 50.0 + (overlap - 4) * 20.0
+
+    # 分数仍是主导项；usage 只做弱惩罚，避免重新退化成“按使用次数优先排序”。
+    reused_penalty = sum(usage_counts.get(ball, 0) * 0.10 for ball in candidate_red)
+    fresh_bonus = sum(0.05 for ball in candidate_red if usage_counts.get(ball, 0) == 0)
+
+    zones = {
+        int(red_meta.get(ball, {}).get("zone", 1))
+        for ball in candidate_red
+    }
+    odd_count = sum(1 for ball in candidate_red if int(red_meta.get(ball, {}).get("parity", ball % 2)) == 1)
+    zone_bonus = len(zones) * 0.08 + (0.18 if len(zones) >= 3 else 0.0)
+    parity_bonus = 0.08 if 2 <= odd_count <= 4 else 0.0
+
+    return base_score + fresh_bonus + zone_bonus + parity_bonus - reused_penalty - overlap_penalty
+
+
+def _assign_cover_blue(
+    ticket_index: int,
+    blue_buckets: Dict[str, List[int]],
+    blue_ranked: List[int],
+    blue_scores: Dict[int, float],
+    used_blues: Set[int],
+) -> Tuple[int, str]:
+    bucket_order = ["main", "explore", "reversion", "main", "explore"]
+    preferred_bucket = bucket_order[ticket_index % len(bucket_order)]
+
+    def _ordered_bucket(numbers: List[int]) -> List[int]:
+        if not numbers:
+            return []
+        order_index = {number: idx for idx, number in enumerate(numbers)}
+        if all(number in blue_scores for number in numbers):
+            return sorted(
+                numbers,
+                key=lambda n: (
+                    -float(blue_scores.get(n, 0.0)),
+                    order_index[n],
+                ),
+            )
+        return list(numbers)
+
+    def _pick_from(numbers: List[int], allow_reuse: bool = False) -> Optional[int]:
+        ordered = _ordered_bucket(numbers)
+        if not ordered:
+            return None
+        for candidate in ordered:
+            if candidate not in used_blues:
+                return candidate
+        return ordered[0] if allow_reuse else None
+
+    pick = _pick_from(list(blue_buckets.get(preferred_bucket, [])), allow_reuse=False)
+    if pick is not None:
+        return pick, preferred_bucket
+
+    for fallback_bucket in ["main", "explore", "reversion"]:
+        if fallback_bucket == preferred_bucket:
+            continue
+        pick = _pick_from(list(blue_buckets.get(fallback_bucket, [])), allow_reuse=False)
+        if pick is not None:
+            return pick, fallback_bucket
+
+    if blue_ranked:
+        ordered = _ordered_bucket(blue_ranked)
+        for candidate in ordered:
+            if candidate not in used_blues:
+                return candidate, "fallback"
+    pick = _pick_from(list(blue_buckets.get(preferred_bucket, [])), allow_reuse=True)
+    if pick is not None:
+        return pick, preferred_bucket
+    for fallback_bucket in ["main", "explore", "reversion"]:
+        if fallback_bucket == preferred_bucket:
+            continue
+        pick = _pick_from(list(blue_buckets.get(fallback_bucket, [])), allow_reuse=True)
+        if pick is not None:
+            return pick, fallback_bucket
+    if blue_ranked:
+        ordered = _ordered_bucket(blue_ranked)
+        if ordered:
+            return ordered[0], "fallback"
+    return 1, "fallback"
+
+
+def generate_team_cover_tickets(
+    snapshot: Dict[str, object],
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    """基于候选分布逐注生成覆盖优先的 5 注实验票。"""
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    ticket_count = int(runtime.get("cover_mode", {}).get("ticket_count", TEAM_TICKET_COUNT))
+    red_ranked = list(snapshot.get("red_ranked", []))
+    red_scores = snapshot.get("red_scores", {}) or {}
+    red_meta = snapshot.get("red_meta", {}) or {}
+    blue_ranked = list(snapshot.get("blue_ranked", []))
+    blue_scores = snapshot.get("blue_scores", {}) or {}
+    blue_buckets = snapshot.get("blue_buckets", {}) or _build_cover_blue_buckets(
+        blue_ranked,
+        blue_scores,
+        runtime_config=runtime,
+    )
+    valid_agents = list(snapshot.get("valid_agents", []))
+    candidate_pool_size = int(runtime.get("cover_mode", {}).get("candidate_pool_size", len(red_ranked)))
+    if len(red_ranked) < 6:
+        return []
+
+    rng = random.Random(seed if seed is not None else _stable_int_seed("team-cover", tuple(red_ranked)))
+    _ = rng
+    tickets: List[Dict[str, object]] = []
+    usage_counts: Counter = Counter()
+    used_blues: Set[int] = set()
+    candidate_pool = list(red_ranked[:max(6, min(len(red_ranked), candidate_pool_size))])
+
+    for ticket_index in range(ticket_count):
+        best_red: Optional[List[int]] = None
+        best_score: Optional[float] = None
+        best_base_score: Optional[float] = None
+        for combo in combinations(candidate_pool, 6):
+            combo_red = sorted(combo)
+            combo_score = _score_cover_red_combo(combo_red, red_scores, red_meta, tickets, usage_counts)
+            combo_base = sum(float(red_scores.get(ball, 0.0)) for ball in combo_red)
+            if (
+                best_red is None
+                or combo_score > (best_score or float("-inf"))
+                or (
+                    abs(combo_score - (best_score or float("-inf"))) < 1e-9
+                    and combo_base > (best_base_score or float("-inf"))
+                )
+                or (
+                    abs(combo_score - (best_score or float("-inf"))) < 1e-9
+                    and abs(combo_base - (best_base_score or float("-inf"))) < 1e-9
+                    and combo_red < best_red
+                )
+            ):
+                best_red = combo_red
+                best_score = combo_score
+                best_base_score = combo_base
+        final_red = best_red or sorted(candidate_pool[:6])
+
+        blue_ball, blue_bucket = _assign_cover_blue(
+            ticket_index,
+            blue_buckets,
+            blue_ranked,
+            blue_scores,
+            used_blues,
+        )
+        used_blues.add(blue_ball)
+        for ball in final_red:
+            usage_counts[ball] += 1
+
+        source_agents = sorted(
+            {
+                agent
+                for ball in final_red
+                for agent in red_meta.get(ball, {}).get("agents", [])
+            }
+        ) or valid_agents
+        focus = "score-anchor" if ticket_index == 0 else "coverage-balance"
+        tickets.append(
+            {
+                "red": final_red,
+                "blue": blue_ball,
+                "sources": source_agents,
+                "explain": (
+                    f"cover_ticket={ticket_index + 1};focus={focus};"
+                    f"blue_bucket={blue_bucket};blue={blue_ball:02d}"
+                ),
+                "explain_json": {
+                    "cover_strategy": {
+                        "mode": "team_cover",
+                        "ticket_index": ticket_index + 1,
+                        "focus": focus,
+                        "blue_bucket": blue_bucket,
+                        "candidate_blue_pool": [int(n) for n in blue_ranked],
+                        "blue_bucket_candidates": [int(n) for n in blue_buckets.get(blue_bucket, [])],
+                        "selected_blue": int(blue_ball),
+                        "max_overlap_with_previous": _max_cover_overlap(final_red, tickets),
+                    }
+                },
+            }
+        )
+
+    return tickets
+
+
 def build_core_pool_snapshot(
     teams: Dict[str, Dict[str, object]],
     lead_model: Dict[str, Dict[str, float]],
@@ -1615,6 +1966,416 @@ def generate_final_team_tickets(
     return generated
 
 
+def _empty_multi_ticket_backtest_summary() -> Dict[str, float]:
+    return {
+        "samples": 0,
+        "avg_ticket_score": 0.0,
+        "best_of_5_avg_score": 0.0,
+        "best_of_5_hit_rate_ge2": 0.0,
+        "best_of_5_hit_rate_ge3": 0.0,
+        "blue_pool_hit_rate": 0.0,
+        "final_blue_hit_rate": 0.0,
+        "avg_overlap": 0.0,
+        "_ticket_count_total": 0.0,
+        "_avg_ticket_score_total": 0.0,
+        "_best_of_5_avg_score_total": 0.0,
+        "_best_of_5_hit_rate_ge2_total": 0.0,
+        "_best_of_5_hit_rate_ge3_total": 0.0,
+        "_blue_pool_hit_rate_total": 0.0,
+        "_final_blue_hit_rate_total": 0.0,
+        "_avg_overlap_total": 0.0,
+    }
+
+
+def _average_ticket_overlap(tickets: List[Dict[str, object]]) -> float:
+    if len(tickets) < 2:
+        return 0.0
+    total = 0.0
+    pairs = 0
+    for index, left in enumerate(tickets):
+        left_red = set(left.get("red", []))
+        for right in tickets[index + 1:]:
+            total += len(left_red & set(right.get("red", [])))
+            pairs += 1
+    return total / max(pairs, 1)
+
+
+def _extract_blue_pool_from_tickets(
+    tickets: List[Dict[str, object]],
+    fallback_blue_pool: Optional[List[int]] = None,
+) -> List[int]:
+    if fallback_blue_pool:
+        return [int(ball) for ball in fallback_blue_pool]
+    pool: Set[int] = set()
+    for ticket in tickets:
+        explain_json = ticket.get("explain_json") or {}
+        if not isinstance(explain_json, dict):
+            continue
+        core_pool = explain_json.get("core_pool", {})
+        if isinstance(core_pool, dict):
+            for ball in core_pool.get("blue_pool", []) or []:
+                if 1 <= int(ball) <= 16:
+                    pool.add(int(ball))
+        cover_strategy = explain_json.get("cover_strategy", {})
+        if isinstance(cover_strategy, dict):
+            for ball in cover_strategy.get("candidate_blue_pool", []) or []:
+                if 1 <= int(ball) <= 16:
+                    pool.add(int(ball))
+    return sorted(pool)
+
+
+def _accumulate_multi_ticket_backtest(
+    summary: Dict[str, float],
+    tickets: List[Dict[str, object]],
+    target: Dict[str, object],
+    fallback_blue_pool: Optional[List[int]] = None,
+) -> None:
+    if not tickets:
+        return
+    summary["samples"] += 1
+    ticket_scores: List[float] = []
+    red_hit_counts: List[int] = []
+    blue_hit_any = False
+    for ticket in tickets:
+        red_hits = len(set(ticket.get("red", [])) & set(target.get("red_balls", [])))
+        blue_hit = 1 if int(ticket.get("blue", 0) or 0) == int(target.get("blue_ball", 0) or 0) else 0
+        score = _ticket_score(ticket.get("red", []), int(ticket.get("blue", 0) or 0), target)
+        ticket_scores.append(score)
+        red_hit_counts.append(red_hits)
+        blue_hit_any = blue_hit_any or bool(blue_hit)
+    blue_pool = _extract_blue_pool_from_tickets(tickets, fallback_blue_pool=fallback_blue_pool)
+    summary["_ticket_count_total"] += len(ticket_scores)
+    summary["_avg_ticket_score_total"] += sum(ticket_scores)
+    summary["_best_of_5_avg_score_total"] += max(ticket_scores)
+    summary["_best_of_5_hit_rate_ge2_total"] += 1.0 if max(red_hit_counts) >= 2 else 0.0
+    summary["_best_of_5_hit_rate_ge3_total"] += 1.0 if max(red_hit_counts) >= 3 else 0.0
+    summary["_blue_pool_hit_rate_total"] += 1.0 if int(target.get("blue_ball", 0) or 0) in blue_pool else 0.0
+    summary["_final_blue_hit_rate_total"] += 1.0 if blue_hit_any else 0.0
+    summary["_avg_overlap_total"] += _average_ticket_overlap(tickets)
+
+
+def _finalize_multi_ticket_backtest(summary: Dict[str, float]) -> Dict[str, object]:
+    samples = int(summary.get("samples", 0))
+    if samples <= 0:
+        return {
+            "samples": 0,
+            "avg_ticket_score": 0.0,
+            "best_of_5_avg_score": 0.0,
+            "best_of_5_hit_rate_ge2": 0.0,
+            "best_of_5_hit_rate_ge3": 0.0,
+            "blue_pool_hit_rate": 0.0,
+            "final_blue_hit_rate": 0.0,
+            "avg_overlap": 0.0,
+        }
+    ticket_count_total = max(float(summary.get("_ticket_count_total", 0.0)), 1.0)
+    sample_total = float(samples)
+    return {
+        "samples": samples,
+        "avg_ticket_score": round(float(summary.get("_avg_ticket_score_total", 0.0)) / ticket_count_total, 6),
+        "best_of_5_avg_score": round(float(summary.get("_best_of_5_avg_score_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_rate_ge2": round(float(summary.get("_best_of_5_hit_rate_ge2_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_rate_ge3": round(float(summary.get("_best_of_5_hit_rate_ge3_total", 0.0)) / sample_total, 6),
+        "blue_pool_hit_rate": round(float(summary.get("_blue_pool_hit_rate_total", 0.0)) / sample_total, 6),
+        "final_blue_hit_rate": round(float(summary.get("_final_blue_hit_rate_total", 0.0)) / sample_total, 6),
+        "avg_overlap": round(float(summary.get("_avg_overlap_total", 0.0)) / sample_total, 6),
+    }
+
+
+def _build_backtest_uplift(experiment: Dict[str, object], baseline: Dict[str, object]) -> Dict[str, float]:
+    uplift: Dict[str, float] = {}
+    for key in BACKTEST_UPLIFT_METRICS:
+        experiment_value = float(experiment.get(key, 0.0))
+        baseline_value = float(baseline.get(key, 0.0))
+        if key == "avg_overlap":
+            uplift[key] = round(baseline_value - experiment_value, 6)
+        else:
+            uplift[key] = round(experiment_value - baseline_value, 6)
+    return uplift
+
+
+def build_experiment_comparison_payload(
+    team_cover_summary: Dict[str, object],
+    team_summary: Dict[str, object],
+    conditional_random_summary: Dict[str, object],
+) -> Dict[str, Dict[str, float]]:
+    return {
+        "team_cover_vs_random_uplift": _build_backtest_uplift(team_cover_summary, conditional_random_summary),
+        "team_vs_random_uplift": _build_backtest_uplift(team_summary, conditional_random_summary),
+    }
+
+
+def _build_three_way_backtest_comparison(
+    team_cover_summary: Dict[str, object],
+    team_summary: Dict[str, object],
+    conditional_random_summary: Dict[str, object],
+) -> Dict[str, Dict[str, float]]:
+    return build_experiment_comparison_payload(
+        team_cover_summary,
+        team_summary,
+        conditional_random_summary,
+    )
+
+
+def _pick_random_blue(
+    preferred_numbers: List[int],
+    used_blues: Set[int],
+    rng: random.Random,
+    allow_reuse: bool = False,
+) -> Optional[int]:
+    if not preferred_numbers:
+        return None
+    unused = [number for number in preferred_numbers if number not in used_blues]
+    if unused:
+        return rng.choice(unused)
+    if allow_reuse:
+        return rng.choice(preferred_numbers)
+    return None
+
+
+def _assign_conditional_random_blue(
+    ticket_index: int,
+    blue_buckets: Dict[str, List[int]],
+    blue_ranked: List[int],
+    used_blues: Set[int],
+    rng: random.Random,
+) -> Tuple[int, str]:
+    bucket_order = ["main", "explore", "reversion", "main", "explore"]
+    preferred_bucket = bucket_order[ticket_index % len(bucket_order)]
+    pick = _pick_random_blue(list(blue_buckets.get(preferred_bucket, [])), used_blues, rng, allow_reuse=False)
+    if pick is not None:
+        return pick, preferred_bucket
+    for fallback_bucket in ["main", "explore", "reversion"]:
+        if fallback_bucket == preferred_bucket:
+            continue
+        pick = _pick_random_blue(list(blue_buckets.get(fallback_bucket, [])), used_blues, rng, allow_reuse=False)
+        if pick is not None:
+            return pick, fallback_bucket
+    pick = _pick_random_blue(list(blue_ranked), used_blues, rng, allow_reuse=False)
+    if pick is not None:
+        return pick, "fallback"
+    pick = _pick_random_blue(list(blue_buckets.get(preferred_bucket, [])), used_blues, rng, allow_reuse=True)
+    if pick is not None:
+        return pick, preferred_bucket
+    pick = _pick_random_blue(list(blue_ranked), used_blues, rng, allow_reuse=True)
+    if pick is not None:
+        return pick, "fallback"
+    return 1, "fallback"
+
+
+def generate_conditional_random_tickets(
+    snapshot: Dict[str, object],
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    ticket_count = int(runtime.get("cover_mode", {}).get("ticket_count", TEAM_TICKET_COUNT))
+    red_ranked = list(snapshot.get("red_ranked", []))
+    blue_ranked = list(snapshot.get("blue_ranked", []))
+    blue_scores = snapshot.get("blue_scores", {}) or {}
+    blue_buckets = snapshot.get("blue_buckets", {}) or _build_cover_blue_buckets(
+        blue_ranked,
+        blue_scores,
+        runtime_config=runtime,
+    )
+    candidate_pool_size = int(runtime.get("cover_mode", {}).get("candidate_pool_size", len(red_ranked)))
+    if len(red_ranked) < 6:
+        return []
+    candidate_pool = list(red_ranked[:max(6, min(len(red_ranked), candidate_pool_size))])
+    rng_seed = seed
+    if rng_seed is None:
+        rng_seed = _stable_int_seed("conditional-random", tuple(candidate_pool), tuple(blue_ranked))
+    rng = random.Random(rng_seed)
+    tickets: List[Dict[str, object]] = []
+    used_blues: Set[int] = set()
+    sample_attempts = max(12, min(64, len(candidate_pool) * 3))
+
+    for ticket_index in range(ticket_count):
+        best_red: Optional[List[int]] = None
+        best_overlap: Optional[int] = None
+        for _ in range(sample_attempts):
+            combo_red = sorted(rng.sample(candidate_pool, 6))
+            overlap = _max_cover_overlap(combo_red, tickets)
+            if (
+                best_red is None
+                or overlap < (best_overlap if best_overlap is not None else 99)
+                or (
+                    overlap == (best_overlap if best_overlap is not None else 99)
+                    and combo_red < best_red
+                )
+            ):
+                best_red = combo_red
+                best_overlap = overlap
+            if overlap <= 4:
+                break
+        final_red = best_red or sorted(candidate_pool[:6])
+        blue_ball, blue_bucket = _assign_conditional_random_blue(
+            ticket_index,
+            blue_buckets,
+            blue_ranked,
+            used_blues,
+            rng,
+        )
+        used_blues.add(blue_ball)
+        tickets.append(
+            {
+                "red": final_red,
+                "blue": blue_ball,
+                "sources": [CONDITIONAL_RANDOM_SOURCE],
+                "explain": (
+                    f"conditional_random_ticket={ticket_index + 1};"
+                    f"blue_bucket={blue_bucket};blue={blue_ball:02d}"
+                ),
+                "explain_json": {
+                    "cover_strategy": {
+                        "mode": "conditional_random",
+                        "ticket_index": ticket_index + 1,
+                        "focus": "conditional-random",
+                        "blue_bucket": blue_bucket,
+                        "candidate_blue_pool": [int(n) for n in blue_ranked],
+                        "blue_bucket_candidates": [int(n) for n in blue_buckets.get(blue_bucket, [])],
+                        "selected_blue": int(blue_ball),
+                        "max_overlap_with_previous": _max_cover_overlap(final_red, tickets),
+                    }
+                },
+            }
+        )
+    return tickets
+
+
+def conditional_random_backtest_report(
+    records: List[Dict],
+    cycles: int = 36,
+    seed: Optional[int] = None,
+    runtime_config: Optional[Dict[str, object]] = None,
+    initial_weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, object]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    samples = list(iterate_archived_cycles(records, cycles=cycles))
+    summary = _empty_multi_ticket_backtest_summary()
+    if not samples:
+        return _finalize_multi_ticket_backtest(summary)
+    lead_learning_cycles = max(8, min(12, cycles))
+    lead_window_sizes = (lead_learning_cycles, max(lead_learning_cycles * 2, 24))
+    for sample_index, (history_timeline, target) in enumerate(samples):
+        history = list(reversed(history_timeline))
+        sample_seed = _stable_int_seed("conditional-random-backtest", seed or 0, target.get("period", sample_index))
+        lead_model = train_lead_agent(
+            history,
+            learning_cycles=min(lead_learning_cycles, len(history)),
+            window_sizes=lead_window_sizes,
+            initial_weights=initial_weights,
+            num_trials=4,
+        )
+        expert_teams = build_expert_teams(history, tickets=resolve_team_ticket_count(TEAM_TICKET_COUNT), seed=sample_seed)
+        snapshot = build_cover_candidate_snapshot(
+            expert_teams,
+            lead_model,
+            diff_factor=1.0,
+            records=history,
+            runtime_config=runtime,
+        )
+        tickets = generate_conditional_random_tickets(snapshot, runtime_config=runtime, seed=sample_seed)
+        _accumulate_multi_ticket_backtest(
+            summary,
+            tickets,
+            target,
+            fallback_blue_pool=list(snapshot.get("blue_ranked", [])),
+        )
+    return _finalize_multi_ticket_backtest(summary)
+
+
+def team_cover_backtest_report(
+    records: List[Dict],
+    cycles: int = 36,
+    seed: Optional[int] = None,
+    runtime_config: Optional[Dict[str, object]] = None,
+    initial_weights: Optional[Dict[str, float]] = None,
+    progress_callback=None,
+) -> Dict[str, object]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    samples = list(iterate_archived_cycles(records, cycles=cycles))
+    summaries = {
+        "team_cover": _empty_multi_ticket_backtest_summary(),
+        "team": _empty_multi_ticket_backtest_summary(),
+        "conditional_random": _empty_multi_ticket_backtest_summary(),
+    }
+    if not samples:
+        finalized = {name: _finalize_multi_ticket_backtest(bucket) for name, bucket in summaries.items()}
+        finalized["comparison"] = _build_three_way_backtest_comparison(
+            finalized["team_cover"],
+            finalized["team"],
+            finalized["conditional_random"],
+        )
+        return finalized
+
+    lead_learning_cycles = max(8, min(12, cycles))
+    lead_window_sizes = (lead_learning_cycles, max(lead_learning_cycles * 2, 24))
+    for sample_index, (history_timeline, target) in enumerate(samples):
+        history = list(reversed(history_timeline))
+        if progress_callback:
+            progress_callback(
+                {
+                    "current": sample_index + 1,
+                    "total": len(samples),
+                    "period": str(target.get("period", "")),
+                    "history_size": len(history),
+                }
+            )
+        sample_seed = _stable_int_seed("team-cover-backtest", seed or 0, target.get("period", sample_index))
+        lead_model = train_lead_agent(
+            history,
+            learning_cycles=min(lead_learning_cycles, len(history)),
+            window_sizes=lead_window_sizes,
+            initial_weights=initial_weights,
+            num_trials=4,
+        )
+        expert_teams = build_expert_teams(history, tickets=resolve_team_ticket_count(TEAM_TICKET_COUNT), seed=sample_seed)
+        team_tickets = generate_final_team_tickets(
+            expert_teams,
+            lead_model=lead_model,
+            diff_factor=1.0,
+            records=history,
+            runtime_config=runtime,
+            seed=sample_seed,
+        )
+        snapshot = build_cover_candidate_snapshot(
+            expert_teams,
+            lead_model,
+            diff_factor=1.0,
+            records=history,
+            runtime_config=runtime,
+        )
+        team_cover_tickets = generate_team_cover_tickets(snapshot, runtime_config=runtime, seed=sample_seed)
+        conditional_random_tickets = generate_conditional_random_tickets(
+            snapshot,
+            runtime_config=runtime,
+            seed=sample_seed,
+        )
+        if not team_tickets or not team_cover_tickets or not conditional_random_tickets:
+            continue
+        _accumulate_multi_ticket_backtest(summaries["team"], team_tickets, target)
+        _accumulate_multi_ticket_backtest(
+            summaries["team_cover"],
+            team_cover_tickets,
+            target,
+            fallback_blue_pool=list(snapshot.get("blue_ranked", [])),
+        )
+        _accumulate_multi_ticket_backtest(
+            summaries["conditional_random"],
+            conditional_random_tickets,
+            target,
+            fallback_blue_pool=list(snapshot.get("blue_ranked", [])),
+        )
+
+    finalized = {name: _finalize_multi_ticket_backtest(bucket) for name, bucket in summaries.items()}
+    finalized["comparison"] = _build_three_way_backtest_comparison(
+        finalized["team_cover"],
+        finalized["team"],
+        finalized["conditional_random"],
+    )
+    return finalized
+
+
 def team_matrix_backtest_report(
     records: List[Dict],
     cycles: int = 36,
@@ -1984,8 +2745,8 @@ def main():
         pass
 
     parser = argparse.ArgumentParser(description='双色球预测工具')
-    parser.add_argument('--mode', '-m', default='team', choices=['single', 'team'],
-                       help='预测模式：single=单策略，team=多Agent团队')
+    parser.add_argument('--mode', '-m', default='team', choices=['single', 'team', 'team-cover'],
+                       help='预测模式：single=单策略，team=多Agent团队，team-cover=覆盖优化实验模式')
     parser.add_argument('--strategy', '-s', default='balanced',
                        choices=['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone'],
                        help='预测策略（新增：cycle=周期性, sum=和值趋势, zone=区间平衡）')
@@ -2001,6 +2762,8 @@ def main():
                        help='权重补丁文件路径（来自 analyze_archive 导出的 weight_patch.json）')
     parser.add_argument('--team-backtest', action='store_true',
                        help='运行 team 端到端矩阵回测（只读历史数据，不写归档）')
+    parser.add_argument('--team-cover-backtest', action='store_true',
+                       help='运行 team-cover 实验模式回测（只读历史数据，不写归档）')
     parser.add_argument('--backtest-cycles', type=int, default=36,
                        help='team 端到端矩阵回测期数（默认36期）')
     parser.add_argument('--advanced', '-adv', action='store_true',
@@ -2014,7 +2777,7 @@ def main():
     print("=" * 60)
     print("🎱 双色球预测结果")
     print("=" * 60)
-    
+
     # 加载数据
     try:
         data = load_data()
@@ -2046,6 +2809,73 @@ def main():
     print("\n" + "=" * 60)
     print("🎯 预测号码")
     print("=" * 60)
+
+    if args.team_cover_backtest:
+        resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
+        _ = patch_source
+        runtime_config = resolve_runtime_config()
+        initial_weights = load_weight_patch(resolved_patch_path)
+        progress_state = {"last_len": 0}
+
+        def _print_team_cover_backtest_progress(update: Dict[str, object]) -> None:
+            current = int(update.get("current", 0))
+            total = int(update.get("total", 0))
+            period = str(update.get("period", ""))
+            progress_text = f"\r⏳ team-cover 回测进度: {current}/{total} | period={period}"
+            print(progress_text, end="", flush=True)
+            progress_state["last_len"] = len(progress_text)
+
+        report = team_cover_backtest_report(
+            records,
+            cycles=args.backtest_cycles,
+            seed=args.seed,
+            runtime_config=runtime_config,
+            initial_weights=initial_weights,
+            progress_callback=_print_team_cover_backtest_progress,
+        )
+        if progress_state["last_len"]:
+            print()
+        print("\n🧪 team-cover 对照回测:")
+        section_names = {
+            "team_cover": "实验模式",
+            "team": "主链路 team",
+            "conditional_random": "条件随机基准",
+        }
+        for key in ["team_cover", "team", "conditional_random"]:
+            section = report.get(key, {})
+            print(
+                f"  - {section_names[key]}: 样本 {section.get('samples', 0)} | "
+                f"单注平均分 {float(section.get('avg_ticket_score', 0.0)):.3f} | "
+                f"best-of-5 平均分 {float(section.get('best_of_5_avg_score', 0.0)):.3f}"
+            )
+            print(
+                f"    红2+率 {float(section.get('best_of_5_hit_rate_ge2', 0.0)):.2%} | "
+                f"红3+率 {float(section.get('best_of_5_hit_rate_ge3', 0.0)):.2%} | "
+                f"蓝球池命中率 {float(section.get('blue_pool_hit_rate', 0.0)):.2%} | "
+                f"最终蓝球命中率 {float(section.get('final_blue_hit_rate', 0.0)):.2%} | "
+                f"平均重叠度 {float(section.get('avg_overlap', 0.0)):.3f}"
+            )
+
+        comparison = report.get("comparison", {})
+        for key, title in [
+            ("team_cover_vs_random_uplift", "实验模式 vs 条件随机 uplift"),
+            ("team_vs_random_uplift", "主链路 team vs 条件随机 uplift"),
+        ]:
+            uplift = comparison.get(key, {})
+            print(
+                f"  - {title}: 单注平均分 {float(uplift.get('avg_ticket_score', 0.0)):+.3f} | "
+                f"best-of-5 平均分 {float(uplift.get('best_of_5_avg_score', 0.0)):+.3f} | "
+                f"红2+率 {float(uplift.get('best_of_5_hit_rate_ge2', 0.0)):+.2%} | "
+                f"红3+率 {float(uplift.get('best_of_5_hit_rate_ge3', 0.0)):+.2%} | "
+                f"蓝球池命中率 {float(uplift.get('blue_pool_hit_rate', 0.0)):+.2%} | "
+                f"最终蓝球命中率 {float(uplift.get('final_blue_hit_rate', 0.0)):+.2%} | "
+                f"平均重叠度改善 {float(uplift.get('avg_overlap', 0.0)):+.3f}"
+            )
+        print("  - 说明: team-cover 回测只读历史样本，不会写入 prediction_archive。")
+        print("\n" + "=" * 60)
+        print("⚠️ 仅供娱乐，不构成投注建议！")
+        print("=" * 60)
+        return
 
     if args.team_backtest:
         resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
@@ -2100,7 +2930,91 @@ def main():
         print("=" * 60)
         return
 
-    if args.mode == 'team':
+    if args.mode == 'team-cover':
+        latest_archive = load_latest_archive()
+        gap_result = evaluate_last_prediction_gap(latest_archive, records[0])
+        resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
+        param_patch_path = find_default_param_patch()
+        matrix_patch_path = find_default_matrix_patch()
+        runtime_config = resolve_runtime_config()
+        initial_weights = load_weight_patch(resolved_patch_path)
+        lead_model = train_lead_agent(
+            records,
+            learning_cycles=args.learn_cycles,
+            initial_weights=initial_weights,
+        )
+        backtest = backtest_report(records, learning_cycles=args.learn_cycles)
+        diff_factor = float(gap_result["factor"])
+        print(f"\n🧪 team-cover 实验模式（回看 {args.learn_cycles} 期进行差异学习）")
+        print(f"🧠 主Agent差异学习: {gap_result['summary']}")
+        if resolved_patch_path:
+            if initial_weights:
+                print(f"🧩 已应用权重补丁: {resolved_patch_path}")
+            else:
+                print(f"⚠️ 权重补丁不可用，已忽略: {resolved_patch_path}")
+        if param_patch_path:
+            print(f"🧪 已应用参数补丁: {param_patch_path}")
+        if matrix_patch_path:
+            print(f"🧭 已应用矩阵补丁: {matrix_patch_path}")
+        print(
+            f"📊 单专家参考回测: 样本 {backtest['overall']['samples']} | 平均分 {backtest['overall']['avg_score']:.3f} | "
+            f"红2+命中率 {backtest['overall']['hit_rate_ge2']:.2%} | 蓝球命中率 {backtest['overall']['blue_hit_rate']:.2%}"
+        )
+
+        team_ticket_count = resolve_team_ticket_count(args.num)
+        if args.num != team_ticket_count:
+            print(f"📐 team-cover 实验模式固定输出 {team_ticket_count} 注。")
+        expert_teams = build_expert_teams(records, tickets=team_ticket_count, seed=args.seed)
+        failed = [name for name, payload in expert_teams.items() if payload.get("error")]
+        if failed:
+            print(f"\n⚠️ 专家团队降级: {', '.join(failed)}")
+        lead_report = build_lead_agent_report(lead_model, gap_result, expert_teams)
+
+        print("\n覆盖优化实验结果:")
+        target_period = next_target_period(records)
+        next_date = next_draw_date_str(records)
+        print(f"📅 预测期号: {target_period} | 预计开奖: {next_date}")
+        cover_runtime = runtime_config.get("cover_mode", {}) if isinstance(runtime_config, dict) else {}
+        print(
+            f"📐 候选红球池: {int(cover_runtime.get('candidate_pool_size', CORE_RED_POOL_SIZE))}球 | "
+            f"蓝球桶容量: {int(cover_runtime.get('blue_bucket_size', CORE_BLUE_POOL_SIZE))}球 | "
+            f"固定输出: {team_ticket_count} 注"
+        )
+        snapshot = build_cover_candidate_snapshot(
+            expert_teams,
+            lead_model,
+            diff_factor=diff_factor,
+            records=records,
+            runtime_config=runtime_config,
+        )
+        red_ranked = list(snapshot.get("red_ranked", []))
+        if red_ranked:
+            print(f"  🔴 候选红球池: {' '.join(f'{int(ball):02d}' for ball in red_ranked)}")
+        blue_buckets = snapshot.get("blue_buckets", {}) if isinstance(snapshot, dict) else {}
+        if isinstance(blue_buckets, dict):
+            for bucket_name, title in [("main", "主攻"), ("explore", "探索"), ("reversion", "回补")]:
+                bucket_values = [int(ball) for ball in blue_buckets.get(bucket_name, []) or []]
+                if bucket_values:
+                    print(f"  🔵 蓝球{title}桶: {' '.join(f'{ball:02d}' for ball in bucket_values)}")
+        final_tickets = generate_team_cover_tickets(
+            snapshot,
+            runtime_config=runtime_config,
+            seed=args.seed,
+        )
+        for i, final_ticket in enumerate(final_tickets):
+            red, blue = final_ticket["red"], final_ticket["blue"]
+            sources = final_ticket.get("sources", [])
+            source_text = ",".join(sources) if sources else "cover"
+            print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d} | 来源 {source_text}")
+        summary = build_archive_lead_summary(
+            diff_factor,
+            lead_report,
+            patch_source=patch_source,
+            mode="team_cover",
+        )
+        saved_path = save_compact_prediction(target_period, final_tickets, summary)
+        print(f"\n💾 已归档本期精简预测: {saved_path}")
+    elif args.mode == 'team':
         latest_archive = load_latest_archive()
         gap_result = evaluate_last_prediction_gap(latest_archive, records[0])
         resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)

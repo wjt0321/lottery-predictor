@@ -92,6 +92,9 @@ python update_data.py
 # 默认使用团队模式，固定生成5注
 python predict.py
 
+# 使用 team-cover 实验模式，固定输出5注实验票并写入归档
+python predict.py --mode team-cover --seed 42
+
 # 使用追热策略，生成3注
 python predict.py --mode single --strategy hot --num 3
 
@@ -106,18 +109,22 @@ python predict.py --help
 
 # 运行 team 端到端矩阵回测（会实时显示进度）
 python predict.py --team-backtest --backtest-cycles 36 --seed 42
+
+# 运行 team-cover 对照回测（只读历史数据，不写归档）
+python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
 ```
 
 **参数说明**：
-- `--mode, -m`: 预测模式 (`single`=单策略, `team`=团队模式，默认team)
+- `--mode, -m`: 预测模式 (`single`=单策略, `team`=团队模式，默认team, `team-cover`=覆盖优化实验模式)
 - `--strategy, -s`: 预测策略 (`hot`/`cold`/`missing`/`balanced`/`random`/`cycle`/`sum`/`zone`)
-- `--num, -n`: 生成注数（`team` 模式固定输出 5 注，`single` 模式按传入值）
+- `--num, -n`: 生成注数（`team` / `team-cover` 模式固定输出 5 注，`single` 模式按传入值）
 - `--all, -a`: 使用所有策略
 - `--advanced, -adv`: 使用高级综合分析
 - `--learn-cycles`: 团队模式回看期数（默认24期）
 - `--seed`: 随机种子（用于复现实验）
 - `--weight-patch`: 显式指定权重补丁路径（未指定时自动尝试 `config/weight_patch.latest.json`）
 - `--team-backtest`: 运行最终 team 矩阵出票链路回测（不写归档，输出单专家口径与最终 5 注口径）
+- `--team-cover-backtest`: 运行 team-cover 实验模式对照回测（不写归档，输出 `team_cover` / `team` / `conditional_random` 三组口径）
 - `--backtest-cycles`: team 端到端回测期数（默认36期）
 
 ### 3. manual_data_import.py - 手动数据导入
@@ -259,6 +266,45 @@ python predict.py --advanced --num 5
 python predict.py --mode team --num 5 --learn-cycles 24
 ```
 
+### 覆盖优化实验模式（--mode team-cover）
+
+`team-cover` 是与主链路并行的实验模式，不替代默认 `team`，目标是在固定 `5` 注预算下验证“覆盖优先”的组合策略是否能稳定优于条件随机基准。
+
+- 仍复用 8 个专家提案、差异学习和补丁回灌能力
+- 不走固定旋转矩阵出票，而是先整理候选分布，再逐注生成覆盖优先的 5 注实验票
+- 会展示候选红球池与蓝球分桶，帮助观察“主攻 / 探索 / 回补”覆盖逻辑
+- **会写入** `prediction_archive/`，沿用现有精简归档格式，`lead_summary.mode=team_cover`
+
+```bash
+python predict.py --mode team-cover --num 5 --learn-cycles 24 --seed 42
+```
+
+### 覆盖优化实验回测（--team-cover-backtest）
+
+`--team-cover-backtest` 使用同一批 walk-forward 历史样本并排评估三条链路：
+
+- `team_cover`：覆盖优化实验模式
+- `team`：当前默认主链路
+- `conditional_random`：在相同候选池与注数约束下的条件随机基准
+
+输出重点：
+
+- 单注平均分
+- best-of-5 平均分
+- 红 `2+` / 红 `3+` 命中率
+- 蓝球池命中率 / 最终蓝球命中率
+- 组合平均重叠度
+- 相对条件随机基准的 uplift
+
+```bash
+python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
+```
+
+说明：
+
+- 只读历史数据，不写 `prediction_archive/`
+- 验收口径优先看相对条件随机基准的 uplift，而不是绝对预测承诺
+
 ## 数据文件
 
 ### lottery_data.json
@@ -327,10 +373,12 @@ python predict.py --mode team --num 5 --learn-cycles 24
 | 场景 | 目标 | 推荐命令 |
 |------|------|----------|
 | 预测 | 团队模式日常预测（默认主链） | `python update_data.py`<br>`python predict.py --mode team --num 5` |
+| 预测 | 覆盖优化实验出票并归档 | `python predict.py --mode team-cover --num 5 --seed 42` |
 | 预测 | 单策略快速对比 | `python predict.py --mode single --all --num 3` |
 | 预测 | 指定策略复现实验 | `python predict.py --mode single --strategy hot --num 3 --seed 42` |
 | 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
 | 分析 | team 端到端矩阵回测（带进度） | `python predict.py --team-backtest --backtest-cycles 36 --seed 42` |
+| 分析 | team-cover 对照回测（不写归档） | `python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42` |
 | 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
 | 分析 | 导出报告并写回三类补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
 | 补丁回灌 | 显式加载权重补丁参与团队预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
@@ -408,6 +456,10 @@ lottery-predictor/
   - 回测可见性与性能优化：长回测期间输出进度，并使用轻量训练参数缩短完整回测耗时
   - 矩阵行语义修正：从“动态淘汰”调整为“动态排序”，`row_weights` 可直接影响默认行顺序
   - 位置权重前移：改为作用在核心池评分阶段，真正影响 `red_pool`
+- **2026-05-19 (Task5)**:
+  - 接通 `--mode team-cover` 主流程：固定输出 5 注实验票，并写入 `prediction_archive`
+  - 接通 `--team-cover-backtest` 主流程：输出 `team_cover` / `team` / `conditional_random` 三组对照与 uplift
+  - 更新 `README.md` / `SKILL.md` / `AGENTS.md`，统一实验模式归档与回测只读口径
 - **2026-05-16 (V4)**:
   - 多样性约束修复：`_find_swap_target` → `_find_best_swap`，最优替代 + 多次迭代
   - 蓝球双重归一化修复：删除第二次 MinMax，保留引擎原始区分度 [0.1, 3.0]
