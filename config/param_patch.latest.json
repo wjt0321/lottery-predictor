@@ -2,8 +2,8 @@
   "version": 1,
   "origin": "manual_fix",
   "pool_params": {
-    "core_red_pool_size": 14,
-    "core_blue_pool_size": 6
+    "core_red_pool_size": 22,
+    "core_blue_pool_size": 10
   },
   "fusion_params": {
     "ticket_decay_step": 0.06,
@@ -12,7 +12,7 @@
     "diversity_trigger_rate": 0.0
   },
   "matrix_params": {
-    "matrix_type": "14_red_guard_6_to_5",
+    "matrix_type": "22_red_cover_6_to_5",
     "preferred_rows": [
       1,
       2,

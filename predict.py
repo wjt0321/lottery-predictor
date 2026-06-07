@@ -1673,7 +1673,14 @@ def generate_rotation_matrix_tickets(
             (1, 3, 5, 6, 8, 9),
             (2, 4, 5, 7, 8, 9),
         ),
-        "14_red_guard_6_to_5": GLOBAL_CONFIG.rotation_matrix_rows,
+        "14_red_guard_6_to_5": (
+            (0, 1, 2, 3, 4, 5),
+            (0, 1, 6, 7, 8, 9),
+            (0, 2, 6, 10, 11, 12),
+            (1, 3, 7, 10, 11, 13),
+            (2, 4, 5, 8, 9, 12),
+        ),
+        "22_red_cover_6_to_5": GLOBAL_CONFIG.rotation_matrix_rows,
     }
     active_matrix = MATRIX_REGISTRY.get(matrix_type, GLOBAL_CONFIG.rotation_matrix_rows)
     matrix_row_count = len(active_matrix)

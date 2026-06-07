@@ -359,8 +359,8 @@ class AnalyzeArchiveTests(unittest.TestCase):
         self.assertIn("pool_params", payload)
         self.assertIn("fusion_params", payload)
         self.assertIn("matrix_params", payload)
-        self.assertEqual(payload["pool_params"]["core_red_pool_size"], 14)  # floor enforced
-        self.assertEqual(payload["pool_params"]["core_blue_pool_size"], 6)  # floor enforced
+        self.assertEqual(payload["pool_params"]["core_red_pool_size"], 22)  # floor enforced (min 14, config 22)
+        self.assertEqual(payload["pool_params"]["core_blue_pool_size"], 10)  # floor enforced (min 6, config 10)
         self.assertIn("ticket_decay_step", payload["fusion_params"])
         self.assertEqual(payload["matrix_params"]["matrix_type"], GLOBAL_CONFIG.rotation_matrix_type)
         self.assertEqual(payload["matrix_params"]["preferred_rows"], [1, 4, 2, 3, 5])

@@ -465,8 +465,8 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
     avg_blue_pool = max(blue_pool_sizes) if blue_pool_sizes else GLOBAL_CONFIG.core_blue_pool_size
 
     # ═══ 池子大小下限：不得低于项目配置默认值，防止过度优化缩池 ═══
-    MIN_RED_POOL = max(10, GLOBAL_CONFIG.core_red_pool_size)
-    MIN_BLUE_POOL = max(4, GLOBAL_CONFIG.core_blue_pool_size)
+    MIN_RED_POOL = max(14, GLOBAL_CONFIG.core_red_pool_size)
+    MIN_BLUE_POOL = max(6, GLOBAL_CONFIG.core_blue_pool_size)
     avg_red_pool = max(avg_red_pool, MIN_RED_POOL)
     avg_blue_pool = max(avg_blue_pool, MIN_BLUE_POOL)
 
