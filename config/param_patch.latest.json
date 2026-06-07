@@ -1,23 +1,24 @@
 {
   "version": 1,
-  "origin": "analyze_archive",
+  "origin": "manual_fix",
   "pool_params": {
-    "core_red_pool_size": 10,
-    "core_blue_pool_size": 4
+    "core_red_pool_size": 14,
+    "core_blue_pool_size": 6
   },
   "fusion_params": {
-    "ticket_decay_step": 0.08,
-    "min_ticket_decay": 0.65,
+    "ticket_decay_step": 0.06,
+    "min_ticket_decay": 0.55,
+    "exploration_ticket": true,
     "diversity_trigger_rate": 0.0
   },
   "matrix_params": {
-    "matrix_type": "10_red_guard_6_to_5",
+    "matrix_type": "14_red_guard_6_to_5",
     "preferred_rows": [
-      5,
       1,
       2,
       3,
-      4
+      4,
+      5
     ]
   }
 }

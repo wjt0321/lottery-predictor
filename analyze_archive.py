@@ -405,17 +405,28 @@ def build_matrix_patch_payload(matrix_ranking: List[Dict[str, object]]) -> Dict[
     if not matrix_ranking:
         return {
             "version": 1,
-            "matrix_type": "",
+            "matrix_type": GLOBAL_CONFIG.rotation_matrix_type or "",
             "row_weights": {},
             "row_scores": {},
             "origin": "analyze_archive",
         }
-    matrix_type = str(matrix_ranking[0].get("matrix_type", "")).strip()
+    matrix_type = str(matrix_ranking[0].get("matrix_type", "")).strip() or GLOBAL_CONFIG.rotation_matrix_type or ""
     score_map = {}
     for row in matrix_ranking:
         row_id = str(row.get("row_id"))
         score_map[row_id] = max(float(row.get("avg_score", 0.0)), 0.0001)
     row_weights = _normalize_weight_map(score_map)
+
+    # ═══ 行权重下限：每行至少保留 1/(2*n) 的权重，防止单行权重过低被边缘化 ═══
+    n_rows = max(len(row_weights), 1)
+    min_weight = 1.0 / (2.0 * n_rows)
+    total = 0.0
+    for k in row_weights:
+        row_weights[k] = max(row_weights[k], min_weight)
+        total += row_weights[k]
+    for k in row_weights:
+        row_weights[k] /= total
+
     return {
         "version": 1,
         "matrix_type": matrix_type,
@@ -450,8 +461,17 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
             matrix_type = str(matrix.get("type", "")).strip()
 
     total_records = max(len(records), 1)
-    avg_red_pool = max(red_pool_sizes) if red_pool_sizes else 10
-    avg_blue_pool = max(blue_pool_sizes) if blue_pool_sizes else 3
+    avg_red_pool = max(red_pool_sizes) if red_pool_sizes else GLOBAL_CONFIG.core_red_pool_size
+    avg_blue_pool = max(blue_pool_sizes) if blue_pool_sizes else GLOBAL_CONFIG.core_blue_pool_size
+
+    # ═══ 池子大小下限：不得低于项目配置默认值，防止过度优化缩池 ═══
+    MIN_RED_POOL = max(10, GLOBAL_CONFIG.core_red_pool_size)
+    MIN_BLUE_POOL = max(4, GLOBAL_CONFIG.core_blue_pool_size)
+    avg_red_pool = max(avg_red_pool, MIN_RED_POOL)
+    avg_blue_pool = max(avg_blue_pool, MIN_BLUE_POOL)
+
+    # ═══ 矩阵类型：优选用配置默认矩阵 ═══
+    effective_matrix_type = GLOBAL_CONFIG.rotation_matrix_type or matrix_type or "10_red_guard_6_to_5"
 
     preferred_rows = []
     for row in matrix_ranking:
@@ -475,12 +495,13 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
             "core_blue_pool_size": int(avg_blue_pool),
         },
         "fusion_params": {
-            "ticket_decay_step": 0.08,
-            "min_ticket_decay": 0.65,
+            "ticket_decay_step": 0.06,
+            "min_ticket_decay": 0.55,
+            "exploration_ticket": True,
             "diversity_trigger_rate": round(diversity_rate, 6),
         },
         "matrix_params": {
-            "matrix_type": matrix_type or (str(matrix_ranking[0].get("matrix_type", "")) if matrix_ranking else ""),
+            "matrix_type": effective_matrix_type,
             "preferred_rows": preferred_rows,
         },
     }

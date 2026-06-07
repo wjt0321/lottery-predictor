@@ -1929,6 +1929,47 @@ def generate_final_team_tickets(
         seed=seed,
     )
     if final_tickets:
+        # ═══ 随机探索票：追加一注完全独立随机号码，防止全策略覆盖外的盲区 ═══
+        runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+        explore_enabled = runtime.get("fusion_params", {}).get("exploration_ticket", True)
+        if explore_enabled:
+            explore_rng = random.Random(
+                _stable_int_seed("exploration", seed or 0, tuple(final_tickets[0].get("red", [])))
+            )
+            explore_red = sorted(explore_rng.sample(range(1, 34), 6))
+            explore_blue = explore_rng.randint(1, 16)
+            final_tickets.append(
+                {
+                    "red": explore_red,
+                    "blue": explore_blue,
+                    "sources": ["random_exploration"],
+                    "explain": (
+                        f"来源Agent=random_exploration;"
+                        f"红球贡献=完全随机;"
+                        f"蓝球贡献={explore_blue:02d}:random(独立随机)"
+                    ),
+                    "explain_json": {
+                        "sources": ["random_exploration"],
+                        "red": [
+                            {
+                                "ball": int(b),
+                                "top_agent": "random_exploration",
+                                "top_contribution": 0.0,
+                                "agent_contributions": {"random_exploration": 0.0},
+                            }
+                            for b in explore_red
+                        ],
+                        "blue": {
+                            "ball": int(explore_blue),
+                            "top_agent": "random_exploration",
+                            "top_contribution": 0.0,
+                            "agent_contributions": {"random_exploration": 0.0},
+                        },
+                        "diversity_replacements": [],
+                        "exploration": True,
+                    },
+                }
+            )
         return final_tickets
 
     generated: List[Dict[str, object]] = []
@@ -2792,13 +2833,16 @@ def main():
 
     stale, stale_detail = is_data_stale(records[0]['date'])
     if stale:
-        print("\n⚠️ 本地开奖数据已落后于最近应开奖期，已停止本次预测。")
-        print(f"📌 本地最新开奖日: {stale_detail['latest_record_date']}")
-        print(f"📌 应有最新开奖日: {stale_detail['expected_latest_draw_date']}")
-        if stale_detail.get("error"):
-            print("📌 数据日期字段异常，无法确认是否已更新。")
-        print("💡 请先运行: python update_data.py")
-        return
+        # 回测模式只读历史数据，允许在数据过期时继续运行
+        if not args.team_backtest and not args.team_cover_backtest:
+            print("\n⚠️ 本地开奖数据已落后于最近应开奖期，已停止本次预测。")
+            print(f"📌 本地最新开奖日: {stale_detail['latest_record_date']}")
+            print(f"📌 应有最新开奖日: {stale_detail['expected_latest_draw_date']}")
+            if stale_detail.get("error"):
+                print("📌 数据日期字段异常，无法确认是否已更新。")
+            print("💡 请先运行: python update_data.py")
+            return
+        print("\n⚠️ 本地开奖数据已落后，回测模式仅使用现有历史数据。")
     
     # 分析数据
     analysis = analyze_hot_cold(records)

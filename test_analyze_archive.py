@@ -5,6 +5,7 @@ import unittest
 
 import analyze_archive
 import predict
+from project_config import GLOBAL_CONFIG
 
 
 class AnalyzeArchiveTests(unittest.TestCase):
@@ -358,10 +359,10 @@ class AnalyzeArchiveTests(unittest.TestCase):
         self.assertIn("pool_params", payload)
         self.assertIn("fusion_params", payload)
         self.assertIn("matrix_params", payload)
-        self.assertEqual(payload["pool_params"]["core_red_pool_size"], 10)
-        self.assertEqual(payload["pool_params"]["core_blue_pool_size"], 3)
+        self.assertEqual(payload["pool_params"]["core_red_pool_size"], 14)  # floor enforced
+        self.assertEqual(payload["pool_params"]["core_blue_pool_size"], 6)  # floor enforced
         self.assertIn("ticket_decay_step", payload["fusion_params"])
-        self.assertEqual(payload["matrix_params"]["matrix_type"], "10_red_guard_6_to_5")
+        self.assertEqual(payload["matrix_params"]["matrix_type"], GLOBAL_CONFIG.rotation_matrix_type)
         self.assertEqual(payload["matrix_params"]["preferred_rows"], [1, 4, 2, 3, 5])
 
     def test_export_reports_writes_param_patch_and_latest_copy(self):
