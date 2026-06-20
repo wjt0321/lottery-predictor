@@ -1628,27 +1628,34 @@ def _select_blue_ball_for_row(
     blue_pool: List[int],
     blue_scores: Dict[int, float],
     used_blues: Set[int],
-    rng: random.Random
+    rng: random.Random,
+    anti_engine: bool = True,
 ) -> int:
-    """为特定行选择蓝球，优先选择未使用的得分较高的蓝球"""
+    """为特定行选择蓝球。
+
+    anti_engine=True: 引擎反相关已证实，优先选引擎低分蓝球（反引擎策略）
+    anti_engine=False: 传统方式，优先选引擎高分蓝球
+    """
     if not blue_pool:
         return 1
-    
+
     candidates = []
     for b in blue_pool:
         score = blue_scores.get(b, 0.5)
         candidates.append((b, score))
-    
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    
+
+    # 反引擎：分数越低越优先；传统：分数越高越优先
+    candidates.sort(key=lambda x: x[1], reverse=not anti_engine)
+
     unused_candidates = [(b, s) for b, s in candidates if b not in used_blues]
-    
+
     if unused_candidates:
         if len(unused_candidates) >= 2:
-            top2 = [b for b, _ in unused_candidates[:2]]
-            return rng.choice(top2)
+            # 从未使用候选中取前2，随机选一个（保留一定随机性）
+            pick_from = [b for b, _ in unused_candidates[:2]]
+            return rng.choice(pick_from)
         return unused_candidates[0][0]
-    
+
     return candidates[0][0]
 
 
@@ -1803,7 +1810,10 @@ def generate_rotation_matrix_tickets(
             else:
                 break  # 找不到可替换的号码
 
-        final_blue = _select_blue_ball_for_row(row_id, blue_pool, blue_scores, used_blues, rng)
+        # 蓝球混合策略：RM票用引擎高分，反共识票用引擎低分
+        final_blue = _select_blue_ball_for_row(
+            row_id, blue_pool, blue_scores, used_blues, rng, anti_engine=False
+        )
         used_blues.add(final_blue)
         source_agents = set()
         red_contrib_json = []
@@ -2205,6 +2215,7 @@ def generate_team_matrix_tickets(
 
         snapshot['blue_pool'] = blue_pool
         snapshot['blue_scores'] = {b: round(float(engine_scores.get(b, 1.0)), 6) for b in blue_pool}
+        snapshot['blue_scores_full'] = {b: round(float(engine_scores.get(b, 1.0)), 6) for b in range(1, 17)}
         snapshot['blue_engine_details'] = {
             'engine_pool': blue_result['pool'],
             'cold_chase': blue_result.get('cold_chase', []),
@@ -2230,80 +2241,87 @@ def generate_team_matrix_tickets(
     tickets = generate_rotation_matrix_tickets(matrix_snapshot, runtime_config=matrix_runtime, seed=seed)
     tickets = _apply_conviction_boost(tickets, snapshot, seed=seed)
 
-    # 生成反共识票：从不在22球共识池中的球采样
+    # 生成反共识票：从全部11个反共识球采样，生成2张反共识票
     consensus_22 = set(full_pool[:22])
-    anti_pool = [b for b in full_pool if b not in consensus_22]  # 后2球
     all_33 = set(range(1, 34))
-    full_anti = sorted(all_33 - consensus_22)  # 所有不在共识22中的球(11球)
-    # 优先用辩论晋升球，不足时从full_anti补
-    debate_promoted_set = set(snapshot.get("debate_promoted", []))
-    anti_candidates = [b for b in full_anti if b in debate_promoted_set or b in anti_pool]
-    if len(anti_candidates) < 6:
-        extra = [b for b in full_anti if b not in anti_candidates]
-        rng_anti = random.Random(seed or _stable_int_seed("anti-ticket", tuple(full_anti)))
-        rng_anti.shuffle(extra)
-        anti_candidates.extend(extra)
-    anti_candidates = list(dict.fromkeys(anti_candidates))  # 去重保序
+    full_anti = sorted(all_33 - consensus_22)  # 全部11个反共识球
 
-    # 从反共识候选池加权采样6个球（分数低的优先→反共识强度高）
-    if len(anti_candidates) >= 6:
+    def _build_anti_ticket(anti_idx: int) -> Dict[str, object]:
+        """生成一张反共识票：从11个反共识球加权采样，选反引擎蓝球"""
+        anti_candidates = list(full_anti)
+        if len(anti_candidates) < 6:
+            # 不足时从共识池低分球补充
+            extra = sorted(consensus_22, key=lambda b: full_scores.get(b, 0.0))[:6-len(anti_candidates)]
+            anti_candidates.extend(extra)
+        anti_seed = seed or _stable_int_seed(f"anti-sample-{anti_idx}", tuple(full_anti))
+        rng_a = random.Random(anti_seed)
         anti_weights = [1.0 / (full_scores.get(b, 0.1) + 0.1) for b in anti_candidates]
-        rng_anti2 = random.Random(seed or _stable_int_seed("anti-sample", tuple(anti_candidates)))
         anti_reds = []
-        anti_pool_copy = list(anti_candidates)
-        anti_w_copy = list(anti_weights)
-        while len(anti_reds) < 6 and anti_pool_copy:
-            r_val = rng_anti2.random() * sum(anti_w_copy)
+        pool_copy = list(anti_candidates)
+        w_copy = list(anti_weights)
+        while len(anti_reds) < 6 and pool_copy:
+            r_val = rng_a.random() * sum(w_copy)
             acc = 0.0
-            for idx, w in enumerate(anti_w_copy):
+            for idx, w in enumerate(w_copy):
                 acc += w
                 if acc >= r_val:
-                    anti_reds.append(anti_pool_copy.pop(idx))
-                    anti_w_copy.pop(idx)
+                    anti_reds.append(pool_copy.pop(idx))
+                    w_copy.pop(idx)
                     break
             else:
-                anti_reds.append(anti_pool_copy.pop(-1))
-                if anti_w_copy:
-                    anti_w_copy.pop(-1)
+                anti_reds.append(pool_copy.pop(-1))
+                if w_copy:
+                    w_copy.pop(-1)
         anti_reds.sort()
 
-        # 蓝球：选引擎绝对最低分蓝球（引擎反相关→反引擎=更高命中率）
-        anti_blue = (tickets[0].get("blue", 1) + 1) % 16 + 1 if tickets else 1
-        all_blue_scores = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
-        if all_blue_scores:
-            anti_blue_ranked = sorted(all_blue_scores.items(), key=lambda x: x[1])
-            used_in_matrix = {t.get("blue", 0) for t in tickets}
-            for b, _ in anti_blue_ranked[:8]:
-                if b not in used_in_matrix:
+        # 蓝球反引擎
+        anti_blue = rng_a.randint(1, 16)
+        all_bs = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
+        if all_bs:
+            ranked_bs = sorted(all_bs.items(), key=lambda x: x[1])
+            existing_blues = {t.get("blue", 0) for t in tickets}
+            for b, _ in ranked_bs[anti_idx:anti_idx+6]:
+                if b not in existing_blues:
                     anti_blue = b
                     break
-
-        anti_ticket = {
+        return {
             "red": anti_reds,
             "blue": anti_blue,
             "sources": ["anti_consensus"],
-            "valid_agents": list(snapshot.get("valid_agents", [])),
-            "explain": f"反共识票;来源=anti_consensus;红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
+            "explain": f"反共识票{anti_idx+1};红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
             "explain_json": {
                 "sources": ["anti_consensus"],
-                "strategy": "anti_consensus",
+                "strategy": f"anti_consensus_{anti_idx+1}",
                 "red": [{"ball": int(b), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
                 "blue": {"ball": int(anti_blue), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}},
-                "core_pool": {"red_pool": anti_candidates, "blue_pool": list(range(1, 17))},
+                "core_pool": {"red_pool": full_anti, "blue_pool": list(range(1, 17))},
                 "diversity_replacements": [],
-                "tier_strategy": "anti_consensus",
+                "tier_strategy": f"anti_consensus_{anti_idx+1}",
             },
             "diversity_replacements": [],
-            "matrix_row_id": 6,
+            "matrix_row_id": 5 + anti_idx + 1,
         }
 
-        # 替换掉平均分最低的那张旋转矩阵票
-        if len(tickets) >= 5:
-            worst_idx = min(
-                range(len(tickets)),
-                key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", [])))
-            )
-            tickets[worst_idx] = anti_ticket
+    # 4+1: 保留前4张RM票，替换最低分1张为反共识票
+    if len(tickets) >= 5:
+        sorted_indices = sorted(
+            range(len(tickets)),
+            key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", [])))
+        )
+        # 替换最低分的1张票为反共识票
+        tickets[sorted_indices[0]] = _build_anti_ticket(0)
+        # 将次低分票的蓝球也换成反引擎（共2张反引擎蓝球=41.67%命中率）
+        if len(sorted_indices) >= 2:
+            second_worst = tickets[sorted_indices[1]]
+            all_bs = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
+            if all_bs:
+                ranked_bs = sorted(all_bs.items(), key=lambda x: x[1])
+                existing = {t.get("blue", 0) for t in tickets if t is not second_worst}
+                for b, _ in ranked_bs[1:9]:
+                    if b not in existing:
+                        second_worst["blue"] = b
+                        second_worst["explain"] = second_worst.get("explain", "") + f";反引擎蓝球={b:02d}"
+                        break
 
     return tickets[:5]
 
