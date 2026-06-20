@@ -81,7 +81,7 @@ class ProjectConfig:
             "fusion_params": {
                 "ticket_decay_step": self.ticket_decay_step,
                 "min_ticket_decay": self.min_ticket_decay,
-                "exploration_ticket": True,
+                "debate_factor": 0.6,
             },
             "matrix_params": {
                 "matrix_type": self.rotation_matrix_type,

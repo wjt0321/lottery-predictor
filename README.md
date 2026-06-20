@@ -390,25 +390,61 @@ python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
 ```
 lottery-predictor/
 ├── AGENT.md                  # 仓库内 Agent 工作说明
+├── AGENTS.md                 # 非 Claude Agent 入口说明（英文）
 ├── CLAUDE.md                 # Claude Code 仓库入口说明
 ├── README.md                 # 本文档
 ├── SKILL.md                  # Claude 技能文档
-├── agent_registry.py         # 共享专家注册表
+├── agent_registry.py         # 共享专家注册表（8 专家固定集合）
 ├── analyze_archive.py        # 归档分析与补丁导出
-├── update_data.py            # 数据更新脚本
-├── predict.py                # 预测主脚本
+├── blue_ball_engine.py       # 独立蓝球预测引擎（7 维度分析）
+├── enhanced_analysis.py      # 增强分析（奖池影响、数据融合）
+├── feature_importance.py     # 特征重要性分析（相关系数）
 ├── manual_data_import.py     # 手动数据导入
+├── predict.py                # 预测主脚本（team/single/team-cover 模式）
+├── project_config.py         # 全局配置中心（ProjectConfig → GLOBAL_CONFIG）
+├── update_data.py            # 数据更新脚本
+├── visual_analyzer.py        # 可视化图表生成（matplotlib 可选）
 ├── lottery_data.json         # 数据文件（自动创建）
+├── test_*.py                 # 单元测试（4 个测试文件）
 ├── config/
 │   ├── weight_patch.latest.json  # 最新专家权重补丁
 │   ├── matrix_patch.latest.json  # 最新矩阵补丁
 │   └── param_patch.latest.json   # 最新参数补丁
+├── docs/
+│   ├── plans/                # 历史设计文档
+│   └── superpowers/          # Superpowers 工作流产物
 └── prediction_archive/       # 预测归档目录
-    ├── 2026038.txt
+    ├── YYYYXXX.txt           # 每期预测归档
     └── analysis_report.*     # 导出的分析报告与补丁
 ```
 
 ## 技术说明
+
+### 系统架构
+
+```
+lottery_data.json ──→ predict.py (team 模式主链路)
+                        │
+                        ├── 1. 补丁加载: weight/matrix/param 三类补丁自动回灌
+                        ├── 2. 差异学习: 专家权重回测学习
+                        ├── 3. 8 专家提案: 各专家独立生成候选号
+                        ├── 4. 核心池聚合: 22 红球 + 10 蓝球，位置权重评分
+                        ├── 5. 反共识辩论: 专家重新评估被排除的11球 → 合并重排名
+                        ├── 6. 蓝球引擎: BlueBallEngine 多维度独立打分
+                        ├── 7. 蓝球辩论: 低分蓝球"偏科"强项晋升
+                        ├── 8. 旋转矩阵: 22 红 → 5 注 6+1
+                        └── 9. 归档: prediction_archive/YYYYXXX.txt
+
+prediction_archive/ ──→ analyze_archive.py
+                           ├── 回填真实开奖结果
+                           └── 导出三类补丁 → config/*.latest.json → 回灌
+```
+
+**自学习闭环**: `predict → archive → analyze → patches → predict`
+
+所有运行参数集中在 `project_config.py` 的 `ProjectConfig` 中管理，通过 `to_runtime_config()` 生成 pool/fusion/matrix/blue/cover 五组参数供运行时使用。蓝球引擎的 7 个维度参数统一通过 `blue_params` 字典传入 `BlueBallEngine`。
+
+**反共识辩论机制**：在核心池聚合后，系统识别被排除的 11 个红球（反共识池）。8 位专家各自用独特的策略视角（hot 看频率、cold 看冷度、missing 看遗漏、cycle 看周期、sum 看和值、zone 看区间、balanced 取平均、random 提供噪音）重新评估这些球。以 `lead_model` 权重聚合辩论意见后，与共识分数合并重排名，前 22 名进入最终池子。蓝球同理：低分蓝球若在某个维度特别突出（如遗漏极值 ≥2.0、某维度 ≥0.85），可获得晋升资格。辩论影响力由 `debate_factor` 参数控制（默认 0.6）。
 
 ### 为什么这些方法"有趣"但不"有效"
 

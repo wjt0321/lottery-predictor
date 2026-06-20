@@ -1876,6 +1876,257 @@ def generate_rotation_matrix_tickets(
     return tickets
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 反共识辩论机制 (Anti-Consensus Debate)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _precompute_expert_analysis(records: List[Dict]) -> Dict[str, object]:
+    """预计算所有专家需要的统计数据，避免重复计算。"""
+    if len(records) < 5:
+        return {"ready": False}
+    return {
+        "ready": True,
+        "hot_cold": analyze_hot_cold(records),
+        "missing": analyze_missing(records),
+        "cycle": analyze_cycle(records),
+        "sum_trend": analyze_sum_trend(records),
+        "zone": analyze_zone_balance(records),
+    }
+
+
+def _expert_evaluate_anti_consensus(
+    agent: str,
+    records: List[Dict],
+    anti_balls: List[int],
+    precomputed: Dict[str, object],
+) -> Dict[int, float]:
+    """专家用自己独特的策略视角评估反共识池中的球。
+
+    每个专家基于相同的底层数据但用完全不同的公式打分，
+    模拟"同一个事实、不同观点"的辩论场景。
+
+    Returns:
+        {ball: score} — 0.0~1.0 归一化分数，分数越高表示该专家越支持晋升此球。
+    """
+    if not precomputed.get("ready") or not anti_balls:
+        return {b: 0.5 for b in anti_balls}
+
+    hc = precomputed["hot_cold"]
+    freq = hc["red_freq"]  # {ball: count}
+    max_f = max(freq.values()) or 1
+
+    if agent == "hot":
+        # 趋势追随者：频率越高分越高
+        return {b: freq.get(b, 0) / max_f for b in anti_balls}
+
+    elif agent == "cold":
+        # 价值逆向者：频率越低分越高（冷号反弹逻辑）
+        return {b: 1.0 - freq.get(b, 0) / max_f for b in anti_balls}
+
+    elif agent == "missing":
+        # 回补猎手：遗漏期数越多分越高
+        miss = precomputed["missing"]["red_missing"]
+        max_m = max(miss.values()) or 1
+        return {b: miss.get(b, 0) / max_m for b in anti_balls}
+
+    elif agent == "cycle":
+        # 周期信仰者：周期稳定性分
+        cs = precomputed["cycle"].get("cycle_scores", {})
+        max_c = max(cs.values()) or 1.0
+        return {b: max(0.0, cs.get(b, 0.0)) / max(max_c, 0.01) for b in anti_balls}
+
+    elif agent == "sum":
+        # 均值回归者：和值贡献匹配度
+        sw = precomputed["sum_trend"].get("sum_weights", {})
+        return {b: sw.get(b, 0.3) for b in anti_balls}
+
+    elif agent == "zone":
+        # 结构主义者：区间需求度
+        zw = precomputed["zone"].get("zone_weights", {})
+        return {b: zw.get(b, 1.0) for b in anti_balls}
+
+    elif agent == "balanced":
+        # 中庸调和者：hot + cold + missing 三视角平均
+        hot_s = _expert_evaluate_anti_consensus("hot", records, anti_balls, precomputed)
+        cold_s = _expert_evaluate_anti_consensus("cold", records, anti_balls, precomputed)
+        miss_s = _expert_evaluate_anti_consensus("missing", records, anti_balls, precomputed)
+        return {b: (hot_s[b] + cold_s[b] + miss_s[b]) / 3.0 for b in anti_balls}
+
+    elif agent == "random":
+        # 混沌噪音源：提供随机扰动，防止所有专家同时忽略某个球
+        # 使用确定性种子保证可复现
+        seed_val = _stable_int_seed("anti-consensus-random", tuple(sorted(anti_balls)))
+        rng = random.Random(seed_val)
+        return {b: rng.random() for b in anti_balls}
+
+    return {b: 0.5 for b in anti_balls}
+
+
+def _build_debate_pool(
+    snapshot: Dict[str, object],
+    records: List[Dict],
+    lead_model: Dict[str, Dict[str, float]],
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> Dict[str, object]:
+    """反共识辩论回合：让专家对反共识池进行二次评估，合并后重排名。
+
+    流程：
+    1. 识别反共识池（不在共识22球中的11个红球）
+    2. 每个专家用自己独特的策略视角给反共识球打分
+    3. 以 lead_model 权重聚合各专家辩论意见
+    4. 合并共识分 + 辩论分，重新排名取前22
+    5. 记录晋升/降级信息用于归档解释
+
+    Returns:
+        更新后的 snapshot（red_pool 可能变化）
+    """
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    debate_factor = float(runtime.get("fusion_params", {}).get("debate_factor", 0.6))
+
+    consensus_red = set(snapshot.get("red_pool", []))
+    all_reds = set(range(1, 34))
+    anti_reds = sorted(all_reds - consensus_red)  # 11 balls
+
+    if not anti_reds:
+        return snapshot
+
+    # 预计算统计数据（所有专家共用）
+    precomputed = _precompute_expert_analysis(records)
+
+    # 每位专家对反共识球进行辩论评估
+    anti_scores: Dict[int, float] = {b: 0.0 for b in anti_reds}
+    total_weight = 0.0
+    for agent in AGENT_TEAMS:
+        agent_weight = float(lead_model.get("weights", {}).get(agent, 0.0))
+        if agent_weight <= 0:
+            continue
+        total_weight += agent_weight
+        agent_eval = _expert_evaluate_anti_consensus(agent, records, anti_reds, precomputed)
+        for ball, score in agent_eval.items():
+            anti_scores[ball] += score * agent_weight
+
+    # 归一化辩论分
+    if total_weight > 0:
+        for ball in anti_reds:
+            anti_scores[ball] /= total_weight
+
+    # 合并：共识球保留原分，反共识球获得辩论分 × debate_factor
+    merged_scores: Dict[int, float] = {}
+    original_scores = snapshot.get("red_scores", {})
+
+    # 共识球保留原有分数
+    for ball in consensus_red:
+        merged_scores[ball] = float(original_scores.get(ball, 0.0))
+
+    # 反共识球：辩论分 × debate_factor（最高0.6，需要足够强才能进入前22）
+    for ball in anti_reds:
+        merged_scores[ball] = anti_scores[ball] * debate_factor
+
+    # 重新排名，取前22
+    ranked = sorted(merged_scores.items(), key=lambda item: (-item[1], item[0]))
+    core_red_pool_size = int(runtime.get("pool_params", {}).get("core_red_pool_size", 22))
+    new_red_pool = [ball for ball, score in ranked if score > 1e-8][:core_red_pool_size]
+
+    # 确保池子达到目标大小
+    if len(new_red_pool) < core_red_pool_size:
+        for ball, _ in ranked:
+            if ball not in new_red_pool:
+                new_red_pool.append(ball)
+            if len(new_red_pool) >= core_red_pool_size:
+                break
+
+    # 记录辩论结果
+    promoted = sorted(set(new_red_pool) - consensus_red)
+    demoted = sorted(consensus_red - set(new_red_pool))
+
+    # 更新 snapshot
+    snapshot["red_pool"] = new_red_pool
+    snapshot["red_scores"] = {ball: round(float(merged_scores.get(ball, 0.0)), 6) for ball in new_red_pool}
+    snapshot["debate_promoted"] = promoted
+    snapshot["debate_demoted"] = demoted
+    snapshot["debate_anti_scores"] = {ball: round(float(anti_scores.get(ball, 0.0)), 6) for ball in anti_reds}
+
+    return snapshot
+
+
+def _build_blue_debate(
+    snapshot: Dict[str, object],
+    blue_engine: "BlueBallEngine",
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """蓝球反共识辩论：检查引擎低分蓝球是否在某个维度有突出表现。
+
+    BlueBallEngine 的 6 个维度各有权重，某些蓝球可能总分低但
+    在某个维度特别突出（如遗漏极值、奇偶强信号）。辩论回合
+    让这些"偏科"蓝球有机会进入候选池。
+
+    Returns:
+        更新后的 snapshot（blue_pool 可能变化）
+    """
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", 10))
+
+    blue_scores = snapshot.get("blue_scores", {})
+    if not blue_scores:
+        return snapshot
+
+    # 按分数排名
+    ranked = sorted(blue_scores.items(), key=lambda x: x[1], reverse=True)
+    consensus_pool = [b for b, _ in ranked[:core_blue_pool_size]]
+    anti_blues = [b for b, _ in ranked[core_blue_pool_size:]]  # 引擎低分蓝球
+
+    if not anti_blues:
+        return snapshot
+
+    # 获取引擎各维度原始分数（用于发现"偏科"球）
+    engine_details = snapshot.get("blue_engine_details", {})
+    # 重新获取完整引擎结果
+    all_scores = blue_engine.predict(pool_size=16)
+    details = all_scores.get("details", {})
+
+    # 检查每个反共识蓝球在各维度的表现
+    dimension_keys = ["missing_scores", "amp_scores", "heat_scores"]
+    promoted = []
+
+    for ball in anti_blues:
+        best_dim_score = 0.0
+        for dim_key in dimension_keys:
+            dim_data = details.get(dim_key, {})
+            if isinstance(dim_data, dict):
+                dim_score = float(dim_data.get(ball, 0.0))
+                best_dim_score = max(best_dim_score, dim_score)
+
+        # 如果某个维度得分 >= 0.7，且在遗漏维度表现好 → 有晋升资格
+        missing_data = details.get("missing_scores", {})
+        missing_score = float(missing_data.get(ball, 0.0)) if isinstance(missing_data, dict) else 0.0
+
+        # 冷号（高遗漏分 >= 2.0）或某维度特别突出
+        if missing_score >= 2.0 or best_dim_score >= 0.85:
+            promoted.append(ball)
+
+    # 最多晋升 2 个反共识蓝球，替换池中最低分的球
+    max_promote = 2
+    promoted = promoted[:max_promote]
+
+    if promoted:
+        # 从池中移除最低分的球
+        consensus_pool_scores = [(b, blue_scores.get(b, 0.0)) for b in consensus_pool]
+        consensus_pool_scores.sort(key=lambda x: x[1])
+        new_pool = [b for b, _ in consensus_pool_scores[len(promoted):]]
+        new_pool.extend(promoted)
+        # 按原分数重新排序
+        new_pool.sort(key=lambda b: blue_scores.get(b, 0.0), reverse=True)
+
+        snapshot["blue_pool"] = new_pool
+        snapshot["blue_scores"] = {b: round(float(blue_scores.get(b, 1.0)), 6) for b in new_pool}
+        snapshot["blue_debate_promoted"] = promoted
+        snapshot["blue_debate_demoted"] = [b for b, _ in consensus_pool_scores[:len(promoted)]]
+
+    return snapshot
+
+
 def generate_team_matrix_tickets(
     teams: Dict[str, Dict[str, object]],
     lead_model: Dict[str, Dict[str, float]],
@@ -1890,6 +2141,19 @@ def generate_team_matrix_tickets(
     snapshot = build_core_pool_snapshot(
         teams, lead_model, diff_factor=diff_factor, runtime_config=runtime, pos_weights=pos_w
     )
+
+    # --- 反共识辩论回合：专家对排除的球进行二次评估 ---
+    if records and len(records) >= 10:
+        snapshot = _build_debate_pool(snapshot, records, lead_model, runtime_config=runtime, seed=seed)
+        promoted = snapshot.get("debate_promoted", [])
+        demoted = snapshot.get("debate_demoted", [])
+        if promoted or demoted:
+            debate_detail = []
+            if promoted:
+                debate_detail.append(f"晋升 {len(promoted)} 球: {' '.join(f'{b:02d}' for b in promoted)}")
+            if demoted:
+                debate_detail.append(f"降级 {len(demoted)} 球: {' '.join(f'{b:02d}' for b in demoted)}")
+            logger.info("辩论回合: %s", "; ".join(debate_detail))
 
     # --- 独立蓝球引擎介入：蓝球完全由 BlueBallEngine 决定 ---
     if records and len(records) >= 5:
@@ -1916,6 +2180,12 @@ def generate_team_matrix_tickets(
             'next_odd_prob': blue_result['details']['next_odd_prob'],
         }
 
+        # --- 蓝球反共识辩论：检查低分蓝球是否有"偏科"强项 ---
+        snapshot = _build_blue_debate(snapshot, blue_engine, runtime_config=runtime)
+        blue_promoted = snapshot.get("blue_debate_promoted", [])
+        if blue_promoted:
+            logger.info("蓝球辩论晋升: %s", " ".join(f"{b:02d}" for b in blue_promoted))
+
     return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime, seed=seed)
 
 
@@ -1936,49 +2206,11 @@ def generate_final_team_tickets(
         seed=seed,
     )
     if final_tickets:
-        # ═══ 随机探索票：追加一注完全独立随机号码，防止全策略覆盖外的盲区 ═══
-        runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
-        explore_enabled = runtime.get("fusion_params", {}).get("exploration_ticket", True)
-        if explore_enabled:
-            explore_rng = random.Random(
-                _stable_int_seed("exploration", seed or 0, tuple(final_tickets[0].get("red", [])))
-            )
-            explore_red = sorted(explore_rng.sample(range(1, 34), 6))
-            explore_blue = explore_rng.randint(1, 16)
-            final_tickets.append(
-                {
-                    "red": explore_red,
-                    "blue": explore_blue,
-                    "sources": ["random_exploration"],
-                    "explain": (
-                        f"来源Agent=random_exploration;"
-                        f"红球贡献=完全随机;"
-                        f"蓝球贡献={explore_blue:02d}:random(独立随机)"
-                    ),
-                    "explain_json": {
-                        "sources": ["random_exploration"],
-                        "red": [
-                            {
-                                "ball": int(b),
-                                "top_agent": "random_exploration",
-                                "top_contribution": 0.0,
-                                "agent_contributions": {"random_exploration": 0.0},
-                            }
-                            for b in explore_red
-                        ],
-                        "blue": {
-                            "ball": int(explore_blue),
-                            "top_agent": "random_exploration",
-                            "top_contribution": 0.0,
-                            "agent_contributions": {"random_exploration": 0.0},
-                        },
-                        "diversity_replacements": [],
-                        "exploration": True,
-                    },
-                }
-            )
+        # 反共识辩论已在 generate_team_matrix_tickets 内部完成，
+        # 不再追加独立随机探索票（反共识池已覆盖模型盲区）
         return final_tickets
 
+    # 回退路径：generate_team_matrix_tickets 返回空时的兜底逻辑
     generated: List[Dict[str, object]] = []
     team_ticket_count = resolve_team_ticket_count(TEAM_TICKET_COUNT)
     fallback_rng = random.Random(seed)
