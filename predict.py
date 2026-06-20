@@ -2037,6 +2037,33 @@ def _build_debate_pool(
             if len(new_red_pool) >= core_red_pool_size:
                 break
 
+    # ═══ 区间强制平衡：确保三区(1-11, 12-22, 23-33)各有足够代表 ═══
+    zone_min = max(5, core_red_pool_size // 3 - 1)  # 每区至少7球(24池)或6球(22池)
+    zones = {1: (1, 11), 2: (12, 22), 3: (23, 33)}
+    for zone_id, (lo, hi) in zones.items():
+        zone_in_pool = [b for b in new_red_pool if lo <= b <= hi]
+        deficit = zone_min - len(zone_in_pool)
+        if deficit <= 0:
+            continue
+        # 从该区间排名最高但未被选中的球中补充
+        zone_candidates = [
+            (b, merged_scores.get(b, 0.0))
+            for b in range(lo, hi + 1)
+            if b not in new_red_pool
+        ]
+        zone_candidates.sort(key=lambda x: -x[1])
+        # 替换池中分数最低的非该区球
+        non_zone_in_pool = [
+            (b, merged_scores.get(b, 0.0))
+            for b in new_red_pool if b < lo or b > hi
+        ]
+        non_zone_in_pool.sort(key=lambda x: x[1])
+        for i in range(min(deficit, len(zone_candidates), len(non_zone_in_pool))):
+            promoted_ball = zone_candidates[i][0]
+            demoted_ball = non_zone_in_pool[i][0]
+            new_red_pool.remove(demoted_ball)
+            new_red_pool.append(promoted_ball)
+
     # 记录辩论结果
     promoted = sorted(set(new_red_pool) - consensus_red)
     demoted = sorted(consensus_red - set(new_red_pool))
@@ -2047,6 +2074,10 @@ def _build_debate_pool(
     snapshot["debate_promoted"] = promoted
     snapshot["debate_demoted"] = demoted
     snapshot["debate_anti_scores"] = {ball: round(float(anti_scores.get(ball, 0.0)), 6) for ball in anti_reds}
+    snapshot["debate_zone_balance"] = {
+        str(zid): len([b for b in new_red_pool if lo <= b <= hi])
+        for zid, (lo, hi) in zones.items()
+    }
 
     return snapshot
 
@@ -2186,7 +2217,372 @@ def generate_team_matrix_tickets(
         if blue_promoted:
             logger.info("蓝球辩论晋升: %s", " ".join(f"{b:02d}" for b in blue_promoted))
 
-    return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime, seed=seed)
+    # --- 4+1 混合出票：4张旋转矩阵(共识) + 1张纯反共识票 ---
+    matrix_snapshot = dict(snapshot)
+    full_pool = list(snapshot.get("red_pool", []))
+    full_scores = snapshot.get("red_scores", {})
+    matrix_snapshot["red_pool"] = full_pool[:22]
+    matrix_snapshot["red_scores"] = {
+        b: full_scores.get(b, 0.0) for b in full_pool[:22]
+    }
+    # 旋转矩阵使用22球池（覆盖现有矩阵索引0-21）
+    matrix_runtime = _deep_merge_dict(runtime, {"pool_params": {"core_red_pool_size": 22}})
+    tickets = generate_rotation_matrix_tickets(matrix_snapshot, runtime_config=matrix_runtime, seed=seed)
+    tickets = _apply_conviction_boost(tickets, snapshot, seed=seed)
+
+    # 生成反共识票：从不在22球共识池中的球采样
+    consensus_22 = set(full_pool[:22])
+    anti_pool = [b for b in full_pool if b not in consensus_22]  # 后2球
+    all_33 = set(range(1, 34))
+    full_anti = sorted(all_33 - consensus_22)  # 所有不在共识22中的球(11球)
+    # 优先用辩论晋升球，不足时从full_anti补
+    debate_promoted_set = set(snapshot.get("debate_promoted", []))
+    anti_candidates = [b for b in full_anti if b in debate_promoted_set or b in anti_pool]
+    if len(anti_candidates) < 6:
+        extra = [b for b in full_anti if b not in anti_candidates]
+        rng_anti = random.Random(seed or _stable_int_seed("anti-ticket", tuple(full_anti)))
+        rng_anti.shuffle(extra)
+        anti_candidates.extend(extra)
+    anti_candidates = list(dict.fromkeys(anti_candidates))  # 去重保序
+
+    # 从反共识候选池加权采样6个球（分数低的优先→反共识强度高）
+    if len(anti_candidates) >= 6:
+        anti_weights = [1.0 / (full_scores.get(b, 0.1) + 0.1) for b in anti_candidates]
+        rng_anti2 = random.Random(seed or _stable_int_seed("anti-sample", tuple(anti_candidates)))
+        anti_reds = []
+        anti_pool_copy = list(anti_candidates)
+        anti_w_copy = list(anti_weights)
+        while len(anti_reds) < 6 and anti_pool_copy:
+            r_val = rng_anti2.random() * sum(anti_w_copy)
+            acc = 0.0
+            for idx, w in enumerate(anti_w_copy):
+                acc += w
+                if acc >= r_val:
+                    anti_reds.append(anti_pool_copy.pop(idx))
+                    anti_w_copy.pop(idx)
+                    break
+            else:
+                anti_reds.append(anti_pool_copy.pop(-1))
+                if anti_w_copy:
+                    anti_w_copy.pop(-1)
+        anti_reds.sort()
+
+        # 蓝球：选引擎绝对最低分蓝球（引擎反相关→反引擎=更高命中率）
+        anti_blue = (tickets[0].get("blue", 1) + 1) % 16 + 1 if tickets else 1
+        all_blue_scores = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
+        if all_blue_scores:
+            anti_blue_ranked = sorted(all_blue_scores.items(), key=lambda x: x[1])
+            used_in_matrix = {t.get("blue", 0) for t in tickets}
+            for b, _ in anti_blue_ranked[:8]:
+                if b not in used_in_matrix:
+                    anti_blue = b
+                    break
+
+        anti_ticket = {
+            "red": anti_reds,
+            "blue": anti_blue,
+            "sources": ["anti_consensus"],
+            "valid_agents": list(snapshot.get("valid_agents", [])),
+            "explain": f"反共识票;来源=anti_consensus;红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
+            "explain_json": {
+                "sources": ["anti_consensus"],
+                "strategy": "anti_consensus",
+                "red": [{"ball": int(b), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
+                "blue": {"ball": int(anti_blue), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}},
+                "core_pool": {"red_pool": anti_candidates, "blue_pool": list(range(1, 17))},
+                "diversity_replacements": [],
+                "tier_strategy": "anti_consensus",
+            },
+            "diversity_replacements": [],
+            "matrix_row_id": 6,
+        }
+
+        # 替换掉平均分最低的那张旋转矩阵票
+        if len(tickets) >= 5:
+            worst_idx = min(
+                range(len(tickets)),
+                key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", [])))
+            )
+            tickets[worst_idx] = anti_ticket
+
+    return tickets[:5]
+
+
+def _generate_stratified_tickets(
+    snapshot: Dict[str, object],
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    """分层采样出票：信念票集中高分球，覆盖票聚焦反共识。
+
+    将 24 球池按分数从高到低分为 4 层（每层 6 球）：
+      - Tier 1 (Top 6):  最高共识分 → 信念票核心
+      - Tier 2 (7-12):   次高共识分 → 信念票+平衡票
+      - Tier 3 (13-18):  中等分（含辩论晋升球）→ 平衡票+覆盖票
+      - Tier 4 (19-24):  低分/反共识 → 覆盖票核心
+
+    5 张票分配：
+      - 信念票 ×2: 从 Tier1+2 加权采样（高分球浓度高→最大化多红同框概率）
+      - 平衡票 ×2: 从 Tier2+3 采样（覆盖中等分数区域）
+      - 覆盖票 ×1: 从 Tier3+4 采样（含反共识晋升球，覆盖模型盲区）
+    """
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    team_ticket_count = resolve_team_ticket_count(5)
+    rng = random.Random(seed or _stable_int_seed("stratified", tuple(snapshot.get("red_pool", []))))
+
+    red_pool = list(snapshot.get("red_pool", []))
+    red_scores = snapshot.get("red_scores", {})
+    blue_pool = list(snapshot.get("blue_pool", [])) or list(range(1, 17))
+    blue_scores = snapshot.get("blue_scores", {})
+    pool_sources = snapshot.get("pool_sources", {})
+    blue_sources = snapshot.get("blue_sources", {})
+    red_agent_contrib = snapshot.get("red_agent_contrib", {})
+    blue_agent_contrib = snapshot.get("blue_agent_contrib", {})
+    valid_agents = list(snapshot.get("valid_agents", []))
+    debate_promoted = set(snapshot.get("debate_promoted", []))
+    debate_demoted = set(snapshot.get("debate_demoted", []))
+
+    if len(red_pool) < 12:
+        # 池太小，回退到旋转矩阵
+        return generate_rotation_matrix_tickets(snapshot, runtime_config=runtime, seed=seed)
+
+    # 按分数排名分层
+    ranked = sorted(red_pool, key=lambda b: red_scores.get(b, 0.0), reverse=True)
+    n = len(ranked)
+    tier_size = max(4, n // 4)
+    tiers = [
+        ranked[0:tier_size],
+        ranked[tier_size:2 * tier_size],
+        ranked[2 * tier_size:3 * tier_size],
+        ranked[3 * tier_size:],
+    ]
+    # 合并短尾层
+    tiers = [t for t in tiers if t]
+
+    def _tier_sample(source_tiers: List[List[int]], k: int, concentration: float) -> List[int]:
+        """从指定层中加权采样 k 个球。concentration 越高，高分球权重越大。"""
+        candidates = []
+        for tier_idx, tier in enumerate(source_tiers):
+            # 越靠前的层权重越高
+            tier_weight = math.exp(-tier_idx * concentration)
+            for ball in tier:
+                score = red_scores.get(ball, 0.5)
+                candidates.append((ball, score * tier_weight))
+        candidates.sort(key=lambda x: -x[1])
+        # 加权不放回采样
+        selected = []
+        pool = list(candidates)
+        while len(selected) < k and pool:
+            weights = [w for _, w in pool]
+            total_w = sum(weights) or 1.0
+            r_val = rng.random() * total_w
+            acc = 0.0
+            picked_idx = len(pool) - 1
+            for idx, (_, w) in enumerate(pool):
+                acc += w
+                if acc >= r_val:
+                    picked_idx = idx
+                    break
+            selected.append(pool.pop(picked_idx)[0])
+        return sorted(selected)
+
+    def _select_blue_for_ticket(ticket_idx: int, used_blues: Set[int]) -> int:
+        """选蓝球：优先引擎高分，确保5票蓝球去重覆盖。"""
+        if not blue_pool:
+            return rng.randint(1, 16)
+
+        # 引擎分数归一化
+        max_s = max(blue_scores.values()) or 1.0
+        candidates = [(b, blue_scores.get(b, 0.5) / max_s) for b in blue_pool]
+
+        # 优先未使用的高分蓝球（Top 3 中随机选，保留一定随机性）
+        candidates.sort(key=lambda x: -x[1])
+        unused = [(b, s) for b, s in candidates if b not in used_blues]
+        if unused:
+            top_n = min(3, len(unused))
+            return rng.choice([b for b, _ in unused[:top_n]])
+
+        return candidates[0][0]
+
+    tickets: List[Dict[str, object]] = []
+    used_blues: Set[int] = set()
+
+    # 定义每张票的策略：(名称, 来源层, 浓度)
+    # 共识模型有正向预测力，信念票聚焦顶部共识区
+    strategies = [
+        ("conviction_1", [0, 1], 1.5),   # 信念票1: Tier1+2(共识区), 高浓度
+        ("conviction_2", [0, 1], 1.5),   # 信念票2: 同上→共识球密集→若模型对则多红同框
+        ("balanced_1",  [1, 2], 0.8),    # 平衡票1: Tier2+3(中间区)
+        ("balanced_2",  [1, 2], 0.8),    # 平衡票2
+        ("coverage",    [2, 3], 0.3),    # 覆盖票: Tier3+4(反共识区)→确保模型盲区被覆盖
+    ]
+
+    for ticket_idx, (strat_name, tier_indices, concentration) in enumerate(strategies):
+        source_tiers = [tiers[i] for i in tier_indices if i < len(tiers)]
+        if not source_tiers:
+            source_tiers = [tiers[0]]
+
+        reds = _tier_sample(source_tiers, k=6, concentration=concentration)
+
+        # 确保覆盖票中至少包含 2 个辩论晋升球
+        if strat_name == "coverage" and len(debate_promoted) >= 2:
+            promoted_in_ticket = [b for b in reds if b in debate_promoted]
+            deficit = 2 - len(promoted_in_ticket)
+            if deficit > 0:
+                # 从未在票中的晋升球补充
+                extra_promoted = [b for b in debate_promoted if b not in reds]
+                rng.shuffle(extra_promoted)
+                for _ in range(min(deficit, len(extra_promoted))):
+                    # 替换票中非晋升球
+                    non_promoted_idx = [
+                        i for i, b in enumerate(reds) if b not in debate_promoted
+                    ]
+                    if non_promoted_idx and extra_promoted:
+                        reds[non_promoted_idx[0]] = extra_promoted.pop(0)
+
+        reds = sorted(reds)
+        blue = _select_blue_for_ticket(ticket_idx, used_blues)
+        used_blues.add(blue)
+
+        # 构建解释信息
+        source_agents = set()
+        for b in reds:
+            for agent in pool_sources.get(str(b), []):
+                source_agents.add(agent)
+        explain_parts = [f"来源Agent={','.join(sorted(source_agents)) if source_agents else 'stratified'}"]
+        explain_parts.append(f"红球策略={strat_name}")
+        explain_parts.append(f"蓝球贡献={blue:02d}:stratified")
+        if debate_promoted:
+            promoted_hits = [b for b in reds if b in debate_promoted]
+            if promoted_hits:
+                explain_parts.append(f"辩论晋升={','.join(f'{b:02d}' for b in promoted_hits)}")
+
+        explain_json = {
+            "sources": sorted(source_agents) or valid_agents,
+            "strategy": strat_name,
+            "red": [
+                {
+                    "ball": int(b),
+                    "top_agent": max(
+                        red_agent_contrib.get(b, {}).items(),
+                        key=lambda x: x[1],
+                        default=("unknown", 0.0),
+                    )[0],
+                    "top_contribution": round(float(max(
+                        red_agent_contrib.get(b, {}).values(),
+                        default=0.0,
+                    )), 6),
+                    "agent_contributions": {
+                        a: round(float(c), 6)
+                        for a, c in red_agent_contrib.get(b, {}).items()
+                    },
+                }
+                for b in reds
+            ],
+            "blue": {
+                "ball": int(blue),
+                "top_agent": max(
+                    blue_agent_contrib.get(blue, {}).items(),
+                    key=lambda x: x[1],
+                    default=("unknown", 0.0),
+                )[0],
+                "top_contribution": round(float(max(
+                    blue_agent_contrib.get(blue, {}).values(),
+                    default=0.0,
+                )), 6),
+                "agent_contributions": {
+                    a: round(float(c), 6)
+                    for a, c in blue_agent_contrib.get(blue, {}).items()
+                },
+            },
+            "core_pool": {
+                "red_pool": red_pool,
+                "blue_pool": blue_pool,
+                "debate_promoted": sorted(debate_promoted),
+                "debate_demoted": sorted(debate_demoted),
+            },
+            "diversity_replacements": [],
+            "tier_strategy": strat_name,
+            "concentration": concentration,
+        }
+
+        tickets.append({
+            "red": reds,
+            "blue": blue,
+            "sources": sorted(source_agents) or valid_agents,
+            "valid_agents": valid_agents,
+            "explain": ";".join(explain_parts),
+            "explain_json": explain_json,
+            "diversity_replacements": [],
+            "matrix_row_id": ticket_idx + 1,
+        })
+
+    return tickets[:team_ticket_count]
+
+
+def _apply_conviction_boost(
+    tickets: List[Dict[str, object]],
+    snapshot: Dict[str, object],
+    seed: Optional[int] = None,
+) -> List[Dict[str, object]]:
+    """信念增强：对平均分最高的票行进行浓度增强。
+
+    找到红球平均得分最高的那张票（"模型最有信心的票"），
+    尝试将其中的低分球替换为池中尚未出现在该票中的高分球。
+    目的：在保留旋转矩阵覆盖率的同时，让至少一张票集中高分球，
+    最大化"模型正确时"的多红同框概率。
+    """
+    if not tickets or len(tickets) < 2:
+        return tickets
+
+    red_scores = snapshot.get("red_scores", {})
+    full_pool = list(snapshot.get("red_pool", []))
+    if not red_scores or not full_pool:
+        return tickets
+
+    rng = random.Random(seed or _stable_int_seed("conviction-boost", tuple(full_pool)))
+
+    # 找平均分最高的票
+    best_idx = 0
+    best_avg = -1.0
+    for i, t in enumerate(tickets):
+        reds = t.get("red", [])
+        if len(reds) != 6:
+            continue
+        avg = sum(red_scores.get(b, 0.0) for b in reds) / 6.0
+        if avg > best_avg:
+            best_avg = avg
+            best_idx = i
+
+    best_ticket = tickets[best_idx]
+    best_reds = list(best_ticket.get("red", []))
+
+    # 找池中比当前票最低分球得分更高的未入选球
+    min_score_in_ticket = min(red_scores.get(b, 0.0) for b in best_reds)
+    min_ball = min(best_reds, key=lambda b: red_scores.get(b, 0.0))
+
+    better_candidates = [
+        b for b in full_pool
+        if b not in best_reds and red_scores.get(b, 0.0) > min_score_in_ticket
+    ]
+    if better_candidates:
+        # 用最高分的未入选球替换最低分球
+        best_candidate = max(better_candidates, key=lambda b: red_scores.get(b, 0.0))
+        new_reds = [best_candidate if b == min_ball else b for b in best_reds]
+        new_reds.sort()
+
+        # 更新票据
+        best_ticket["red"] = new_reds
+        best_ticket["explain"] = (
+            best_ticket.get("explain", "") + f";信念增强={best_candidate:02d}替换{min_ball:02d}"
+        )
+        if "explain_json" in best_ticket and isinstance(best_ticket["explain_json"], dict):
+            best_ticket["explain_json"]["conviction_boost"] = {
+                "replaced": min_ball,
+                "replacement": best_candidate,
+            }
+
+    return tickets
 
 
 def generate_final_team_tickets(

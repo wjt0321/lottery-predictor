@@ -19,7 +19,7 @@ class ProjectConfig:
     draw_cutoff_minute: int = 30
     
     team_ticket_count: int = 5
-    core_red_pool_size: int = 22
+    core_red_pool_size: int = 24
     core_blue_pool_size: int = 10
     rotation_matrix_type: str = "22_red_cover_6_to_5"
     rotation_matrix_rows: Tuple[Tuple[int, ...], ...] = field(
@@ -81,7 +81,7 @@ class ProjectConfig:
             "fusion_params": {
                 "ticket_decay_step": self.ticket_decay_step,
                 "min_ticket_decay": self.min_ticket_decay,
-                "debate_factor": 0.6,
+                "debate_factor": 0.9,
             },
             "matrix_params": {
                 "matrix_type": self.rotation_matrix_type,

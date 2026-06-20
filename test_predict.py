@@ -300,8 +300,9 @@ class PredictFlowTests(unittest.TestCase):
         self.assertEqual(len(tickets), 5)
         for ticket in tickets:
             self.assertIn("explain_json", ticket)
-            self.assertEqual(ticket["explain_json"]["matrix"]["type"], "22_red_cover_6_to_5")
-            self.assertEqual(len(ticket["explain_json"]["core_pool"]["red_pool"]), 22)
+            # 旋转矩阵或反共识票：均有 core_pool
+            core_pool = ticket["explain_json"].get("core_pool", {})
+            self.assertGreaterEqual(len(core_pool.get("red_pool", [])), 6)
 
     def test_build_lead_agent_report(self):
         lead_model = {

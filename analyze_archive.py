@@ -497,7 +497,7 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
         "fusion_params": {
             "ticket_decay_step": 0.06,
             "min_ticket_decay": 0.55,
-            "debate_factor": 0.6,
+            "debate_factor": 0.9,
             "diversity_trigger_rate": round(diversity_rate, 6),
         },
         "matrix_params": {
