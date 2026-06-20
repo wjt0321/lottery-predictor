@@ -17,6 +17,11 @@ import math
 from agent_registry import AGENT_TEAMS
 from project_config import GLOBAL_CONFIG
 from blue_ball_engine import BlueBallEngine
+try:
+    from xgb_expert import get_xgb_scores, XGB_AVAILABLE as XGB_OK
+except ImportError:
+    XGB_OK = False
+    get_xgb_scores = None  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
