@@ -2279,9 +2279,11 @@ def generate_team_matrix_tickets(
     }
     matrix_runtime = _deep_merge_dict(runtime, {"pool_params": {"core_red_pool_size": 22}})
     tickets = generate_rotation_matrix_tickets(matrix_snapshot, runtime_config=matrix_runtime, seed=seed)
-    tickets = _apply_conviction_boost(tickets, snapshot, seed=seed)
+    # 计算共现矩阵用于信念增强（单次计算，所有增强共享）
+    pair_cooc = _analyze_pairwise_cooccurrence(records) if records else None
+    tickets = _apply_conviction_boost(tickets, snapshot, seed=seed, pair_cooccur=pair_cooc)
 
-    # 生成反共识票：从全部11个反共识球采样
+    # 生成反共识票：用共现加权采样
     consensus_22 = set(full_pool[:22])
     all_33 = set(range(1, 34))
     full_anti = sorted(all_33 - consensus_22)
@@ -2293,14 +2295,22 @@ def generate_team_matrix_tickets(
             anti_candidates.extend(extra)
         anti_seed = seed or _stable_int_seed(f"anti-sample-{anti_idx}", tuple(full_anti))
         rng_a = random.Random(anti_seed)
+        # 共现加权：反共识球中经常一起出现的优先同票
         anti_weights = [1.0 / (full_scores.get(b, 0.1) + 0.1) for b in anti_candidates]
         anti_reds = []
         pool_copy = list(anti_candidates)
         w_copy = list(anti_weights)
         while len(anti_reds) < 6 and pool_copy:
-            r_val = rng_a.random() * sum(w_copy)
+            # 共现加成：候选球与已选球的共现分
+            cooc_bonus = [0.0] * len(pool_copy)
+            if pair_cooc and anti_reds:
+                for idx, b in enumerate(pool_copy):
+                    partners = set(pair_cooc.get(b, []))
+                    cooc_bonus[idx] = sum(1 for rb in anti_reds if rb in partners) * 0.3
+            combined_w = [w_copy[i] * (1.0 + cooc_bonus[i]) for i in range(len(pool_copy))]
+            r_val = rng_a.random() * sum(combined_w)
             acc = 0.0
-            for idx, w in enumerate(w_copy):
+            for idx, w in enumerate(combined_w):
                 acc += w
                 if acc >= r_val:
                     anti_reds.append(pool_copy.pop(idx))
@@ -2562,13 +2572,12 @@ def _apply_conviction_boost(
     tickets: List[Dict[str, object]],
     snapshot: Dict[str, object],
     seed: Optional[int] = None,
+    pair_cooccur: Optional[Dict[int, List[int]]] = None,
 ) -> List[Dict[str, object]]:
-    """信念增强：对平均分最高的票行进行浓度增强。
+    """信念增强：对平均分最高的票行进行浓度增强，优先选共现球。
 
-    找到红球平均得分最高的那张票（"模型最有信心的票"），
-    尝试将其中的低分球替换为池中尚未出现在该票中的高分球。
-    目的：在保留旋转矩阵覆盖率的同时，让至少一张票集中高分球，
-    最大化"模型正确时"的多红同框概率。
+    找到红球平均得分最高的那张票，将其中的低分球替换为
+    池中高分球，优先选择与票内已有球共现频率高的球→直接提升多红同框概率。
     """
     if not tickets or len(tickets) < 2:
         return tickets
@@ -2579,6 +2588,14 @@ def _apply_conviction_boost(
         return tickets
 
     rng = random.Random(seed or _stable_int_seed("conviction-boost", tuple(full_pool)))
+
+    def _cooc_score(candidate: int, existing: List[int]) -> float:
+        """计算候选球与已有球的共现得分。"""
+        if not pair_cooccur or candidate not in pair_cooccur:
+            return 0.0
+        partners = set(pair_cooccur.get(candidate, []))
+        hits = sum(1 for b in existing if b in partners)
+        return hits / max(1, len(existing))
 
     # 找平均分最高的票
     best_idx = 0
@@ -2595,7 +2612,7 @@ def _apply_conviction_boost(
     best_ticket = tickets[best_idx]
     best_reds = list(best_ticket.get("red", []))
 
-    # 信念增强：替换最多2个低分球为高分球
+    # 信念增强：替换最多2个低分球，优先共现球
     replacements = []
     for _ in range(2):
         current_reds = list(best_ticket.get("red", best_reds))
@@ -2607,14 +2624,17 @@ def _apply_conviction_boost(
         ]
         if not better_candidates:
             break
-        best_candidate = max(better_candidates, key=lambda b: red_scores.get(b, 0.0))
+        # 综合评分：模型分(60%) + 共现分(40%)
+        best_candidate = max(better_candidates, key=lambda b:
+            red_scores.get(b, 0.0) * 0.6 + _cooc_score(b, current_reds) * 0.4
+        )
         current_reds = [best_candidate if b == min_ball else b for b in current_reds]
         replacements.append((min_ball, best_candidate))
         best_ticket["red"] = sorted(current_reds)
 
     if replacements:
         boost_desc = ";".join(f"{new:02d}>{old:02d}" for old, new in replacements)
-        best_ticket["explain"] = best_ticket.get("explain", "") + f";信念增强={boost_desc}"
+        best_ticket["explain"] = best_ticket.get("explain", "") + f";共现信念增强={boost_desc}"
         if "explain_json" in best_ticket and isinstance(best_ticket["explain_json"], dict):
             best_ticket["explain_json"]["conviction_boost"] = [
                 {"replaced": old, "replacement": new} for old, new in replacements
