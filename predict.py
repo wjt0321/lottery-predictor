@@ -2575,30 +2575,30 @@ def _apply_conviction_boost(
     best_ticket = tickets[best_idx]
     best_reds = list(best_ticket.get("red", []))
 
-    # 找池中比当前票最低分球得分更高的未入选球
-    min_score_in_ticket = min(red_scores.get(b, 0.0) for b in best_reds)
-    min_ball = min(best_reds, key=lambda b: red_scores.get(b, 0.0))
-
-    better_candidates = [
-        b for b in full_pool
-        if b not in best_reds and red_scores.get(b, 0.0) > min_score_in_ticket
-    ]
-    if better_candidates:
-        # 用最高分的未入选球替换最低分球
+    # 信念增强：替换1个低分球为高分球（强化浓度但不过度集中）
+    replacements = []
+    for _ in range(1):
+        current_reds = list(best_ticket.get("red", best_reds))
+        min_score_in_ticket = min(red_scores.get(b, 0.0) for b in current_reds)
+        min_ball = min(current_reds, key=lambda b: red_scores.get(b, 0.0))
+        better_candidates = [
+            b for b in full_pool
+            if b not in current_reds and red_scores.get(b, 0.0) > min_score_in_ticket
+        ]
+        if not better_candidates:
+            break
         best_candidate = max(better_candidates, key=lambda b: red_scores.get(b, 0.0))
-        new_reds = [best_candidate if b == min_ball else b for b in best_reds]
-        new_reds.sort()
+        current_reds = [best_candidate if b == min_ball else b for b in current_reds]
+        replacements.append((min_ball, best_candidate))
+        best_ticket["red"] = sorted(current_reds)
 
-        # 更新票据
-        best_ticket["red"] = new_reds
-        best_ticket["explain"] = (
-            best_ticket.get("explain", "") + f";信念增强={best_candidate:02d}替换{min_ball:02d}"
-        )
+    if replacements:
+        boost_desc = ";".join(f"{new:02d}>{old:02d}" for old, new in replacements)
+        best_ticket["explain"] = best_ticket.get("explain", "") + f";信念增强={boost_desc}"
         if "explain_json" in best_ticket and isinstance(best_ticket["explain_json"], dict):
-            best_ticket["explain_json"]["conviction_boost"] = {
-                "replaced": min_ball,
-                "replacement": best_candidate,
-            }
+            best_ticket["explain_json"]["conviction_boost"] = [
+                {"replaced": old, "replacement": new} for old, new in replacements
+            ]
 
     return tickets
 
@@ -2667,6 +2667,9 @@ def _empty_multi_ticket_backtest_summary() -> Dict[str, float]:
         "best_of_5_avg_score": 0.0,
         "best_of_5_hit_rate_ge2": 0.0,
         "best_of_5_hit_rate_ge3": 0.0,
+        "best_of_5_hit_rate_ge4": 0.0,
+        "best_of_5_hit_rate_ge5": 0.0,
+        "best_of_5_hit_rate_ge6": 0.0,
         "blue_pool_hit_rate": 0.0,
         "final_blue_hit_rate": 0.0,
         "avg_overlap": 0.0,
@@ -2675,6 +2678,9 @@ def _empty_multi_ticket_backtest_summary() -> Dict[str, float]:
         "_best_of_5_avg_score_total": 0.0,
         "_best_of_5_hit_rate_ge2_total": 0.0,
         "_best_of_5_hit_rate_ge3_total": 0.0,
+        "_best_of_5_hit_rate_ge4_total": 0.0,
+        "_best_of_5_hit_rate_ge5_total": 0.0,
+        "_best_of_5_hit_rate_ge6_total": 0.0,
         "_blue_pool_hit_rate_total": 0.0,
         "_final_blue_hit_rate_total": 0.0,
         "_avg_overlap_total": 0.0,
@@ -2741,8 +2747,12 @@ def _accumulate_multi_ticket_backtest(
     summary["_ticket_count_total"] += len(ticket_scores)
     summary["_avg_ticket_score_total"] += sum(ticket_scores)
     summary["_best_of_5_avg_score_total"] += max(ticket_scores)
-    summary["_best_of_5_hit_rate_ge2_total"] += 1.0 if max(red_hit_counts) >= 2 else 0.0
-    summary["_best_of_5_hit_rate_ge3_total"] += 1.0 if max(red_hit_counts) >= 3 else 0.0
+    max_hits = max(red_hit_counts) if red_hit_counts else 0
+    summary["_best_of_5_hit_rate_ge2_total"] += 1.0 if max_hits >= 2 else 0.0
+    summary["_best_of_5_hit_rate_ge3_total"] += 1.0 if max_hits >= 3 else 0.0
+    summary["_best_of_5_hit_rate_ge4_total"] += 1.0 if max_hits >= 4 else 0.0
+    summary["_best_of_5_hit_rate_ge5_total"] += 1.0 if max_hits >= 5 else 0.0
+    summary["_best_of_5_hit_rate_ge6_total"] += 1.0 if max_hits >= 6 else 0.0
     summary["_blue_pool_hit_rate_total"] += 1.0 if int(target.get("blue_ball", 0) or 0) in blue_pool else 0.0
     summary["_final_blue_hit_rate_total"] += 1.0 if blue_hit_any else 0.0
     summary["_avg_overlap_total"] += _average_ticket_overlap(tickets)
@@ -2757,6 +2767,9 @@ def _finalize_multi_ticket_backtest(summary: Dict[str, float]) -> Dict[str, obje
             "best_of_5_avg_score": 0.0,
             "best_of_5_hit_rate_ge2": 0.0,
             "best_of_5_hit_rate_ge3": 0.0,
+            "best_of_5_hit_rate_ge4": 0.0,
+            "best_of_5_hit_rate_ge5": 0.0,
+            "best_of_5_hit_rate_ge6": 0.0,
             "blue_pool_hit_rate": 0.0,
             "final_blue_hit_rate": 0.0,
             "avg_overlap": 0.0,
@@ -2769,6 +2782,9 @@ def _finalize_multi_ticket_backtest(summary: Dict[str, float]) -> Dict[str, obje
         "best_of_5_avg_score": round(float(summary.get("_best_of_5_avg_score_total", 0.0)) / sample_total, 6),
         "best_of_5_hit_rate_ge2": round(float(summary.get("_best_of_5_hit_rate_ge2_total", 0.0)) / sample_total, 6),
         "best_of_5_hit_rate_ge3": round(float(summary.get("_best_of_5_hit_rate_ge3_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_rate_ge4": round(float(summary.get("_best_of_5_hit_rate_ge4_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_rate_ge5": round(float(summary.get("_best_of_5_hit_rate_ge5_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_rate_ge6": round(float(summary.get("_best_of_5_hit_rate_ge6_total", 0.0)) / sample_total, 6),
         "blue_pool_hit_rate": round(float(summary.get("_blue_pool_hit_rate_total", 0.0)) / sample_total, 6),
         "final_blue_hit_rate": round(float(summary.get("_final_blue_hit_rate_total", 0.0)) / sample_total, 6),
         "avg_overlap": round(float(summary.get("_avg_overlap_total", 0.0)) / sample_total, 6),
@@ -3100,6 +3116,9 @@ def team_matrix_backtest_report(
         "best_of_5_avg_score": 0.0,
         "best_of_5_hit_rate_ge2": 0.0,
         "best_of_5_hit_rate_ge3": 0.0,
+        "best_of_5_hit_rate_ge4": 0.0,
+        "best_of_5_hit_rate_ge5": 0.0,
+        "best_of_5_hit_rate_ge6": 0.0,
         "blue_pool_hit_rate": 0.0,
         "final_blue_hit_rate": 0.0,
     }
@@ -3168,10 +3187,14 @@ def team_matrix_backtest_report(
 
         if not ticket_scores:
             continue
+        max_hits = max(red_hit_counts) if red_hit_counts else 0
         overall["avg_ticket_score"] += sum(ticket_scores)
         overall["best_of_5_avg_score"] += max(ticket_scores)
-        overall["best_of_5_hit_rate_ge2"] += 1.0 if max(red_hit_counts) >= 2 else 0.0
-        overall["best_of_5_hit_rate_ge3"] += 1.0 if max(red_hit_counts) >= 3 else 0.0
+        overall["best_of_5_hit_rate_ge2"] += 1.0 if max_hits >= 2 else 0.0
+        overall["best_of_5_hit_rate_ge3"] += 1.0 if max_hits >= 3 else 0.0
+        overall["best_of_5_hit_rate_ge4"] += 1.0 if max_hits >= 4 else 0.0
+        overall["best_of_5_hit_rate_ge5"] += 1.0 if max_hits >= 5 else 0.0
+        overall["best_of_5_hit_rate_ge6"] += 1.0 if max_hits >= 6 else 0.0
         overall["blue_pool_hit_rate"] += 1.0 if blue_pool_hit else 0.0
         overall["final_blue_hit_rate"] += 1.0 if blue_hit_any else 0.0
 
@@ -3180,6 +3203,9 @@ def team_matrix_backtest_report(
     overall["best_of_5_avg_score"] = round(overall["best_of_5_avg_score"] / sample_count, 6)
     overall["best_of_5_hit_rate_ge2"] = round(overall["best_of_5_hit_rate_ge2"] / sample_count, 6)
     overall["best_of_5_hit_rate_ge3"] = round(overall["best_of_5_hit_rate_ge3"] / sample_count, 6)
+    overall["best_of_5_hit_rate_ge4"] = round(overall["best_of_5_hit_rate_ge4"] / sample_count, 6)
+    overall["best_of_5_hit_rate_ge5"] = round(overall["best_of_5_hit_rate_ge5"] / sample_count, 6)
+    overall["best_of_5_hit_rate_ge6"] = round(overall["best_of_5_hit_rate_ge6"] / sample_count, 6)
     overall["blue_pool_hit_rate"] = round(overall["blue_pool_hit_rate"] / sample_count, 6)
     overall["final_blue_hit_rate"] = round(overall["final_blue_hit_rate"] / sample_count, 6)
 
@@ -3610,13 +3636,19 @@ def main():
             f"  - 样本 {team_backtest['overall']['samples']} | 单注平均分 {team_backtest['overall']['avg_ticket_score']:.3f} | "
             f"best-of-5 平均分 {team_backtest['overall']['best_of_5_avg_score']:.3f}"
         )
+        overall = team_backtest['overall']
         print(
-            f"  - best-of-5 红2+率 {team_backtest['overall']['best_of_5_hit_rate_ge2']:.2%} | "
-            f"best-of-5 红3+率 {team_backtest['overall']['best_of_5_hit_rate_ge3']:.2%}"
+            f"  - best-of-5 红2+率 {overall['best_of_5_hit_rate_ge2']:.2%} | "
+            f"红3+率 {overall['best_of_5_hit_rate_ge3']:.2%} | "
+            f"红4+率 {overall.get('best_of_5_hit_rate_ge4', 0):.2%}"
         )
         print(
-            f"  - 蓝球池命中率 {team_backtest['overall']['blue_pool_hit_rate']:.2%} | "
-            f"最终5注蓝球命中率 {team_backtest['overall']['final_blue_hit_rate']:.2%}"
+            f"  - best-of-5 红5+率 {overall.get('best_of_5_hit_rate_ge5', 0):.2%} | "
+            f"红6率 {overall.get('best_of_5_hit_rate_ge6', 0):.2%} | "
+            f"蓝球池命中率 {overall['blue_pool_hit_rate']:.2%}"
+        )
+        print(
+            f"  - 最终5注蓝球命中率 {overall['final_blue_hit_rate']:.2%}"
         )
         if team_backtest["matrix_rows"]:
             print("  - 矩阵行表现:")
