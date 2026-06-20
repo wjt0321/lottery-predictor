@@ -17,11 +17,6 @@ import math
 from agent_registry import AGENT_TEAMS
 from project_config import GLOBAL_CONFIG
 from blue_ball_engine import BlueBallEngine
-try:
-    from xgb_expert import get_xgb_scores, XGB_AVAILABLE as XGB_OK
-except ImportError:
-    XGB_OK = False
-    get_xgb_scores = None  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -449,28 +444,6 @@ def _analyze_pairwise_cooccurrence(records, window=60):
         scored = {p: c/total for p, c in partners.items()}
         top_partners = sorted(scored, key=scored.get, reverse=True)[:8]
         result[ball] = top_partners
-    return result
-
-
-def _analyze_delta_momentum(records, window=30):
-    """分析频率变化趋势。频率上升的球得分高（动量效应）。"""
-    if len(records) < window * 2:
-        return {b: 0.5 for b in range(1, 34)}
-    older = records[window:window*2]
-    newer = records[:window]
-    old_freq = Counter()
-    new_freq = Counter()
-    for r in older:
-        old_freq.update(r['red_balls'])
-    for r in newer:
-        new_freq.update(r['red_balls'])
-    result = {}
-    for b in range(1, 34):
-        old_f = old_freq.get(b, 0)
-        new_f = new_freq.get(b, 0)
-        delta = new_f - old_f
-        # Sigmoid to normalize to [0,1]
-        result[b] = 1.0 / (1.0 + math.exp(-delta * 2))
     return result
 
 
