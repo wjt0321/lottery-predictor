@@ -2238,14 +2238,27 @@ def generate_team_matrix_tickets(
                 debate_detail.append(f"降级 {len(demoted)} 球: {' '.join(f'{b:02d}' for b in demoted)}")
             logger.info("辩论回合: %s", "; ".join(debate_detail))
 
-    # --- 简化蓝球：频率+遗漏甜点区（替代复杂引擎） ---
+    # --- 蓝球引擎：优先使用独立引擎，失败时回退到频率+遗漏甜点区 ---
     if records and len(records) >= 5:
         core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
-        blue_scores_simple, blue_pool_simple = _simple_blue_score(records)
-        blue_pool = blue_pool_simple[:core_blue_pool_size]
-        snapshot['blue_pool'] = blue_pool
-        snapshot['blue_scores'] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in blue_pool}
-        snapshot['blue_scores_full'] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in range(1, 17)}
+        try:
+            blue_engine = BlueBallEngine(records, config=_runtime_blue_params(runtime))
+            blue_result = blue_engine.predict(pool_size=core_blue_pool_size)
+            blue_scores_full = {
+                int(b): round(float(score), 6)
+                for b, score in blue_result.get("scores", {}).items()
+                if 1 <= int(b) <= 16
+            }
+            blue_pool = [int(b) for b in blue_result.get("pool", []) if 1 <= int(b) <= 16][:core_blue_pool_size]
+            snapshot["blue_pool"] = blue_pool
+            snapshot["blue_scores"] = {b: blue_scores_full.get(b, 1.0) for b in blue_pool}
+            snapshot["blue_scores_full"] = {b: blue_scores_full.get(b, 1.0) for b in range(1, 17)}
+        except Exception:
+            blue_scores_simple, blue_pool_simple = _simple_blue_score(records)
+            blue_pool = blue_pool_simple[:core_blue_pool_size]
+            snapshot["blue_pool"] = blue_pool
+            snapshot["blue_scores"] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in blue_pool}
+            snapshot["blue_scores_full"] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in range(1, 17)}
 
     # --- 旋转矩阵出票 + 共现信念增强 + 反共识覆盖 ---
     matrix_snapshot = dict(snapshot)
