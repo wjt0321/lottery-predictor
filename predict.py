@@ -2269,89 +2269,56 @@ def generate_team_matrix_tickets(
         snapshot['blue_scores'] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in blue_pool}
         snapshot['blue_scores_full'] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in range(1, 17)}
 
-    # --- 4+1 混合出票：4张旋转矩阵(共识) + 1张纯反共识票 ---
+    # --- 旋转矩阵出票 + 共现信念增强 + 反共识覆盖 ---
     matrix_snapshot = dict(snapshot)
     full_pool = list(snapshot.get("red_pool", []))
     full_scores = snapshot.get("red_scores", {})
     matrix_snapshot["red_pool"] = full_pool[:22]
-    matrix_snapshot["red_scores"] = {
-        b: full_scores.get(b, 0.0) for b in full_pool[:22]
-    }
+    matrix_snapshot["red_scores"] = {b: full_scores.get(b, 0.0) for b in full_pool[:22]}
     matrix_runtime = _deep_merge_dict(runtime, {"pool_params": {"core_red_pool_size": 22}})
     tickets = generate_rotation_matrix_tickets(matrix_snapshot, runtime_config=matrix_runtime, seed=seed)
-    # 计算共现矩阵用于信念增强（单次计算，所有增强共享）
-    pair_cooc = _analyze_pairwise_cooccurrence(records) if records else None
+    pair_cooc = _analyze_pairwise_cooccurrence(records, window=80) if records else None
     tickets = _apply_conviction_boost(tickets, snapshot, seed=seed, pair_cooccur=pair_cooc)
 
-    # 生成反共识票：用共现加权采样
+    # 反共识覆盖票：从模型排除的球中采样
     consensus_22 = set(full_pool[:22])
-    all_33 = set(range(1, 34))
-    full_anti = sorted(all_33 - consensus_22)
+    all_33_set = set(range(1, 34))
+    full_anti = sorted(all_33_set - consensus_22)
 
     def _build_anti_ticket(anti_idx: int) -> Dict[str, object]:
         anti_candidates = list(full_anti)
         if len(anti_candidates) < 6:
             extra = sorted(consensus_22, key=lambda b: full_scores.get(b, 0.0))[:6-len(anti_candidates)]
             anti_candidates.extend(extra)
-        anti_seed = seed or _stable_int_seed(f"anti-sample-{anti_idx}", tuple(full_anti))
+        anti_seed = seed or _stable_int_seed(f"anti-{anti_idx}", tuple(full_anti))
         rng_a = random.Random(anti_seed)
-        # 共现加权：反共识球中经常一起出现的优先同票
         anti_weights = [1.0 / (full_scores.get(b, 0.1) + 0.1) for b in anti_candidates]
-        anti_reds = []
-        pool_copy = list(anti_candidates)
-        w_copy = list(anti_weights)
-        while len(anti_reds) < 6 and pool_copy:
-            # 共现加成：候选球与已选球的共现分
-            cooc_bonus = [0.0] * len(pool_copy)
-            if pair_cooc and anti_reds:
-                for idx, b in enumerate(pool_copy):
-                    partners = set(pair_cooc.get(b, []))
-                    cooc_bonus[idx] = sum(1 for rb in anti_reds if rb in partners) * 0.3
-            combined_w = [w_copy[i] * (1.0 + cooc_bonus[i]) for i in range(len(pool_copy))]
-            r_val = rng_a.random() * sum(combined_w)
-            acc = 0.0
-            for idx, w in enumerate(combined_w):
+        anti_reds = []; pool_c = list(anti_candidates); w_c = list(anti_weights)
+        while len(anti_reds) < 6 and pool_c:
+            r_val = rng_a.random() * sum(w_c); acc = 0.0
+            for idx, w in enumerate(w_c):
                 acc += w
-                if acc >= r_val:
-                    anti_reds.append(pool_copy.pop(idx))
-                    w_copy.pop(idx)
-                    break
-            else:
-                anti_reds.append(pool_copy.pop(-1))
-                if w_copy:
-                    w_copy.pop(-1)
+                if acc >= r_val: anti_reds.append(pool_c.pop(idx)); w_c.pop(idx); break
+            else: anti_reds.append(pool_c.pop(-1)); w_c.pop(-1) if w_c else None
         anti_reds.sort()
-        # 简化蓝球：甜点区采样（不用反引擎）
-        bs_simple, _ = _simple_blue_score(records) if records else ({}, [])
-        existing_blues = {t.get("blue", 0) for t in tickets}
+        bs_s, _ = _simple_blue_score(records) if records else ({}, [])
+        existing_b = {t.get("blue", 0) for t in tickets}
         anti_blue = rng_a.randint(1, 16)
-        if bs_simple:
-            ranked_b = sorted(bs_simple.items(), key=lambda x: -x[1])
-            for b, _ in ranked_b:
-                if b not in existing_blues:
-                    anti_blue = b
-                    break
-        return {
-            "red": anti_reds, "blue": anti_blue,
-            "sources": ["anti_consensus"],
+        if bs_s:
+            for b, _ in sorted(bs_s.items(), key=lambda x: -x[1]):
+                if b not in existing_b: anti_blue = b; break
+        return {"red": anti_reds, "blue": anti_blue, "sources": ["anti_consensus"],
             "explain": f"反共识票{anti_idx+1};红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
-            "explain_json": {
-                "sources": ["anti_consensus"], "strategy": f"anti_consensus_{anti_idx+1}",
-                "red": [{"ball": int(b), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
-                "blue": {"ball": int(anti_blue), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}},
-                "core_pool": {"red_pool": full_anti, "blue_pool": list(range(1, 17))},
-                "diversity_replacements": [], "tier_strategy": f"anti_consensus_{anti_idx+1}",
-            },
-            "diversity_replacements": [], "matrix_row_id": 5 + anti_idx + 1,
-        }
+            "explain_json": {"sources": ["anti_consensus"], "strategy": f"anti_{anti_idx+1}",
+                "red": [{"ball": int(b), "top_agent": "anti", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
+                "blue": {"ball": int(anti_blue), "top_agent": "anti", "top_contribution": 0.0, "agent_contributions": {}},
+                "core_pool": {"red_pool": full_anti}, "diversity_replacements": [], "tier_strategy": f"anti_{anti_idx+1}"},
+            "diversity_replacements": [], "matrix_row_id": 5 + anti_idx + 1}
 
-    # 4+1: 保留前4张RM票，替换最低分1张为反共识票
     if len(tickets) >= 5:
-        sorted_indices = sorted(
-            range(len(tickets)),
-            key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", [])))
-        )
-        tickets[sorted_indices[0]] = _build_anti_ticket(0)
+        sorted_idx = sorted(range(len(tickets)),
+            key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", []))))
+        tickets[sorted_idx[0]] = _build_anti_ticket(0)
 
     return tickets[:5]
 
