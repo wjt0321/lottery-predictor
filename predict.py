@@ -488,7 +488,7 @@ def _simple_blue_score(records, window=60):
         miss = last_seen.get(b, len(records))
         # 甜点区：中等频率(25%-75%分位)+中等遗漏(5-15期)
         freq_score = 1.0 - abs(f/max_f - 0.5) * 2.0 if max_f > 0 else 0.5
-        miss_score = 1.0 if 5 <= miss <= 20 else (0.6 if miss < 5 else 0.8)
+        miss_score = 1.0 if 6 <= miss <= 22 else (0.65 if miss < 6 else 0.8)
         scores[b] = freq_score * 0.6 + miss_score * 0.4
     ranked = sorted(scores.items(), key=lambda x: -x[1])
     pool = [b for b, _ in ranked[:8]]
