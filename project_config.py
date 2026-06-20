@@ -18,7 +18,7 @@ class ProjectConfig:
     draw_cutoff_hour: int = 21
     draw_cutoff_minute: int = 30
     
-    team_ticket_count: int = 5
+    team_ticket_count: int = 10
     core_red_pool_size: int = 24
     core_blue_pool_size: int = 10
     rotation_matrix_type: str = "22_red_cover_6_to_5"

@@ -2308,9 +2308,8 @@ def generate_team_matrix_tickets(
             range(len(tickets)),
             key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", [])))
         )
-        # 替换最低分的1张票为反共识票
         tickets[sorted_indices[0]] = _build_anti_ticket(0)
-        # 将次低分票的蓝球也换成反引擎（共2张反引擎蓝球=41.67%命中率）
+        # 将次低分票的蓝球也换成反引擎
         if len(sorted_indices) >= 2:
             second_worst = tickets[sorted_indices[1]]
             all_bs = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
@@ -2323,7 +2322,56 @@ def generate_team_matrix_tickets(
                         second_worst["explain"] = second_worst.get("explain", "") + f";反引擎蓝球={b:02d}"
                         break
 
-    return tickets[:5]
+    # 10票模式：前5张(4RM+1反共识) + 后5张(反共识+信念浓缩)
+    team_ticket_count = resolve_team_ticket_count(TEAM_TICKET_COUNT)
+    if team_ticket_count > 5:
+        extra_rng = random.Random(seed or _stable_int_seed("extra-tickets", tuple(full_pool)))
+        existing_blues = {t.get("blue", 0) for t in tickets}
+        # 额外5张：2反共识 + 3信念浓缩（从共识顶部密集采样）
+        for extra_idx in range(team_ticket_count - len(tickets)):
+            if extra_idx < 2:
+                # 反共识票3号和4号（与前2张反共识票不同种子→不同球）
+                extra_ticket = _build_anti_ticket(extra_idx + 50)
+            else:
+                # 信念浓缩票：从池子前14球高浓度采样（最大化多红同框概率）
+                top14 = full_pool[:14]
+                top_scores = {b: full_scores.get(b, 0.0) for b in top14}
+                ranked_top = sorted(top14, key=lambda b: top_scores.get(b, 0.0), reverse=True)
+                # 指数权重采样：越靠前权重越大
+                weights = [math.exp(-i * 0.5) for i in range(len(ranked_top))]
+                total_w = sum(weights)
+                extra_reds = []
+                avail = list(ranked_top)
+                w_avail = list(weights)
+                while len(extra_reds) < 6 and avail:
+                    r_val = extra_rng.random() * sum(w_avail)
+                    acc = 0.0
+                    for idx, w in enumerate(w_avail):
+                        acc += w
+                        if acc >= r_val:
+                            extra_reds.append(avail.pop(idx))
+                            w_avail.pop(idx)
+                            break
+                    else:
+                        extra_reds.append(avail.pop(-1))
+                        if w_avail:
+                            w_avail.pop(-1)
+                extra_reds.sort()
+                extra_blue = extra_rng.randint(1, 16)
+                while extra_blue in existing_blues:
+                    extra_blue = extra_rng.randint(1, 16)
+                existing_blues.add(extra_blue)
+                extra_ticket = {
+                    "red": extra_reds, "blue": extra_blue,
+                    "sources": ["conviction_hi"],
+                    "explain": f"信念浓缩票{extra_idx-1};红球={' '.join(f'{b:02d}' for b in extra_reds)};蓝球={extra_blue:02d}",
+                    "explain_json": {"sources": ["conviction_hi"], "strategy": "conviction_hi",
+                        "core_pool": {"red_pool": full_pool}, "diversity_replacements": []},
+                    "diversity_replacements": [], "matrix_row_id": 10 + extra_idx,
+                }
+            tickets.append(extra_ticket)
+
+    return tickets[:team_ticket_count]
 
 
 def _generate_stratified_tickets(
