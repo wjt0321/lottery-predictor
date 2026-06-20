@@ -422,55 +422,120 @@ def _safe_red_sample(
     return sorted(selected)
 
 
+def _analyze_pairwise_cooccurrence(records, window=60):
+    """分析红球两两共现频率。返回 {ball: [frequent_partners]}"""
+    if len(records) < 20:
+        return {}
+    recent = records[:window]
+    pair_count = defaultdict(Counter)
+    single_count = Counter()
+    for r in recent:
+        reds = r['red_balls']
+        single_count.update(reds)
+        for i in range(len(reds)):
+            for j in range(i+1, len(reds)):
+                pair_count[reds[i]][reds[j]] += 1
+                pair_count[reds[j]][reds[i]] += 1
+    # Normalize: for each ball, rank partners by co-occurrence frequency
+    result = {}
+    for ball in range(1, 34):
+        partners = pair_count.get(ball, Counter())
+        total = single_count.get(ball, 1)
+        scored = {p: c/total for p, c in partners.items()}
+        top_partners = sorted(scored, key=scored.get, reverse=True)[:8]
+        result[ball] = top_partners
+    return result
+
+
+def _analyze_delta_momentum(records, window=30):
+    """分析频率变化趋势。频率上升的球得分高（动量效应）。"""
+    if len(records) < window * 2:
+        return {b: 0.5 for b in range(1, 34)}
+    older = records[window:window*2]
+    newer = records[:window]
+    old_freq = Counter()
+    new_freq = Counter()
+    for r in older:
+        old_freq.update(r['red_balls'])
+    for r in newer:
+        new_freq.update(r['red_balls'])
+    result = {}
+    for b in range(1, 34):
+        old_f = old_freq.get(b, 0)
+        new_f = new_freq.get(b, 0)
+        delta = new_f - old_f
+        # Sigmoid to normalize to [0,1]
+        result[b] = 1.0 / (1.0 + math.exp(-delta * 2))
+    return result
+
+
+def _simple_blue_score(records, window=60):
+    """简化蓝球评分：频率+遗漏甜点区。避免极端冷热。"""
+    if len(records) < 5:
+        return {b: 0.5 for b in range(1, 17)}, list(range(1, 17))
+    recent = records[:window]
+    freq = Counter(r['blue_ball'] for r in recent)
+    # 遗漏计算
+    last_seen = {}
+    for idx, r in enumerate(records):
+        b = r['blue_ball']
+        if b not in last_seen:
+            last_seen[b] = idx
+    scores = {}
+    max_f = max(freq.values()) or 1
+    for b in range(1, 17):
+        f = freq.get(b, 0)
+        miss = last_seen.get(b, len(records))
+        # 甜点区：中等频率(25%-75%分位)+中等遗漏(5-15期)
+        freq_score = 1.0 - abs(f/max_f - 0.5) * 2.0 if max_f > 0 else 0.5
+        miss_score = 1.0 if 5 <= miss <= 20 else (0.6 if miss < 5 else 0.8)
+        scores[b] = freq_score * 0.6 + miss_score * 0.4
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+    pool = [b for b, _ in ranked[:8]]
+    return scores, pool
+
+
 def generate_prediction(records, strategy='balanced', rng: random.Random = None, use_enhanced=False):
-    """按单策略生成预测号码 - V2: 集成独立蓝球引擎。"""
+    """按单策略生成预测号码 — 各专家用不同时间窗和方法去共识化。"""
     rng = rng or random.Random()
     if not records:
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
 
-    analysis = {
-        'hot_cold': analyze_hot_cold(records),
-        'missing': analyze_missing(records),
-        'blue_missing': analyze_blue_missing(records),
-        'trend': analyze_trend(records),
-    }
+    # 各专家用不同窗口分析 → 去共识化
+    hc_short = analyze_hot_cold(records, recent_periods=30)
+    hc_long = analyze_hot_cold(records, recent_periods=100)
+    missing_data = analyze_missing(records)
 
-    hot_red = analysis['hot_cold']['hot_red']
-    cold_red = analysis['hot_cold']['cold_red']
-    high_missing = analysis['missing']['high_missing_red']
-
-    # 使用独立蓝球引擎获取蓝球候选池
-    if len(records) >= 5:
-        blue_engine = BlueBallEngine(records, config=_runtime_blue_params())
-        blue_result = blue_engine.predict(pool_size=8)
-        blue_candidates = blue_result['pool']
-    else:
-        blue_candidates = list(range(1, 17))
+    # 简化蓝球
+    blue_scores, blue_candidates = _simple_blue_score(records)
 
     if strategy == 'hot':
-        candidates = hot_red
+        # 短期热度（30期窗口）
+        candidates = hc_short['hot_red']
     elif strategy == 'cold':
-        candidates = cold_red
+        # 深度冷号（100期窗口）→ 捕捉长期冷门
+        candidates = hc_long['cold_red']
     elif strategy == 'missing':
-        candidates = high_missing
+        candidates = missing_data['high_missing_red']
     elif strategy == 'balanced':
-        candidates = list(set(hot_red[:5] + cold_red[:5] + high_missing[:5]))
+        # 多视角融合：短期热+长期冷+遗漏
+        candidates = list(set(hc_short['hot_red'][:5] + hc_long['cold_red'][:5] + missing_data['high_missing_red'][:5]))
     elif strategy == 'cycle':
-        cycle_analysis = analyze_cycle(records)
+        cycle_analysis = analyze_cycle(records, max_period=40)
         candidates = cycle_analysis['top_cycle'][:12]
         if not candidates:
-            candidates = hot_red[:5] + high_missing[:5]
+            candidates = hc_short['hot_red'][:6] + missing_data['high_missing_red'][:6]
     elif strategy == 'sum':
-        sum_analysis = analyze_sum_trend(records)
+        sum_analysis = analyze_sum_trend(records, periods=40)
         weighted_candidates = sorted(
             sum_analysis['sum_weights'].items(),
             key=lambda x: x[1], reverse=True
         )
         candidates = [n for n, w in weighted_candidates[:14]]
         if not candidates:
-            candidates = hot_red[:5] + high_missing[:5]
+            candidates = hc_short['hot_red'][:7] + missing_data['high_missing_red'][:7]
     elif strategy == 'zone':
-        zone_analysis = analyze_zone_balance(records)
+        zone_analysis = analyze_zone_balance(records, periods=30)
         candidates = []
         for zone in [1, 2, 3]:
             zone_hot = zone_analysis['zone_hot'][zone]
@@ -478,7 +543,7 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
             candidates.extend(zone_hot[:need + 2])
         candidates = list(set(candidates))
         if len(candidates) < 10:
-            candidates.extend(hot_red[:max(0, 10 - len(candidates))])
+            candidates.extend(hc_short['hot_red'][:max(0, 10 - len(candidates))])
             candidates = sorted(set(candidates))
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
@@ -499,10 +564,9 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
 
     red_balls = _safe_red_sample(rng, candidates, required=6)
 
-    # 蓝球：用引擎得分加权采样
+    # 简化蓝球选择：甜点区加权采样
     if len(records) >= 5 and blue_candidates:
-        engine_scores = blue_result['scores']
-        bc_weights = [engine_scores.get(b, 0.5) for b in blue_candidates]
+        bc_weights = [blue_scores.get(b, 0.5) for b in blue_candidates]
         total_w = sum(bc_weights)
         if total_w > 0:
             r_val = rng.random() * total_w
@@ -2196,37 +2260,14 @@ def generate_team_matrix_tickets(
                 debate_detail.append(f"降级 {len(demoted)} 球: {' '.join(f'{b:02d}' for b in demoted)}")
             logger.info("辩论回合: %s", "; ".join(debate_detail))
 
-    # --- 独立蓝球引擎介入：蓝球完全由 BlueBallEngine 决定 ---
+    # --- 简化蓝球：频率+遗漏甜点区（替代复杂引擎） ---
     if records and len(records) >= 5:
         core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", CORE_BLUE_POOL_SIZE))
-        blue_config = runtime.get("blue_params", {}) or {}
-
-        # 运行独立蓝球引擎
-        blue_engine = BlueBallEngine(records, config=blue_config)
-        blue_result = blue_engine.predict(pool_size=max(core_blue_pool_size, 6))
-
-        # 蓝球完全由引擎决定，不再融合 Agent 提案
-        # 引擎内部已将分数归一化到 [0.1, 3.0]，保留充分区分度
-        # 不再做第二次 MinMax 压缩，避免稀释 6 维分析信号
-        engine_scores = blue_result['scores']
-
-        ranked_blue = sorted(engine_scores.items(), key=lambda x: x[1], reverse=True)
-        blue_pool = [b for b, _ in ranked_blue[:core_blue_pool_size]]
-
+        blue_scores_simple, blue_pool_simple = _simple_blue_score(records)
+        blue_pool = blue_pool_simple[:core_blue_pool_size]
         snapshot['blue_pool'] = blue_pool
-        snapshot['blue_scores'] = {b: round(float(engine_scores.get(b, 1.0)), 6) for b in blue_pool}
-        snapshot['blue_scores_full'] = {b: round(float(engine_scores.get(b, 1.0)), 6) for b in range(1, 17)}
-        snapshot['blue_engine_details'] = {
-            'engine_pool': blue_result['pool'],
-            'cold_chase': blue_result.get('cold_chase', []),
-            'next_odd_prob': blue_result['details']['next_odd_prob'],
-        }
-
-        # --- 蓝球反共识辩论：检查低分蓝球是否有"偏科"强项 ---
-        snapshot = _build_blue_debate(snapshot, blue_engine, runtime_config=runtime)
-        blue_promoted = snapshot.get("blue_debate_promoted", [])
-        if blue_promoted:
-            logger.info("蓝球辩论晋升: %s", " ".join(f"{b:02d}" for b in blue_promoted))
+        snapshot['blue_scores'] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in blue_pool}
+        snapshot['blue_scores_full'] = {b: round(float(blue_scores_simple.get(b, 1.0)), 6) for b in range(1, 17)}
 
     # --- 4+1 混合出票：4张旋转矩阵(共识) + 1张纯反共识票 ---
     matrix_snapshot = dict(snapshot)
@@ -2236,21 +2277,18 @@ def generate_team_matrix_tickets(
     matrix_snapshot["red_scores"] = {
         b: full_scores.get(b, 0.0) for b in full_pool[:22]
     }
-    # 旋转矩阵使用22球池（覆盖现有矩阵索引0-21）
     matrix_runtime = _deep_merge_dict(runtime, {"pool_params": {"core_red_pool_size": 22}})
     tickets = generate_rotation_matrix_tickets(matrix_snapshot, runtime_config=matrix_runtime, seed=seed)
     tickets = _apply_conviction_boost(tickets, snapshot, seed=seed)
 
-    # 生成反共识票：从全部11个反共识球采样，生成2张反共识票
+    # 生成反共识票：从全部11个反共识球采样
     consensus_22 = set(full_pool[:22])
     all_33 = set(range(1, 34))
-    full_anti = sorted(all_33 - consensus_22)  # 全部11个反共识球
+    full_anti = sorted(all_33 - consensus_22)
 
     def _build_anti_ticket(anti_idx: int) -> Dict[str, object]:
-        """生成一张反共识票：从11个反共识球加权采样，选反引擎蓝球"""
         anti_candidates = list(full_anti)
         if len(anti_candidates) < 6:
-            # 不足时从共识池低分球补充
             extra = sorted(consensus_22, key=lambda b: full_scores.get(b, 0.0))[:6-len(anti_candidates)]
             anti_candidates.extend(extra)
         anti_seed = seed or _stable_int_seed(f"anti-sample-{anti_idx}", tuple(full_anti))
@@ -2273,33 +2311,28 @@ def generate_team_matrix_tickets(
                 if w_copy:
                     w_copy.pop(-1)
         anti_reds.sort()
-
-        # 蓝球反引擎
+        # 简化蓝球：甜点区采样（不用反引擎）
+        bs_simple, _ = _simple_blue_score(records) if records else ({}, [])
+        existing_blues = {t.get("blue", 0) for t in tickets}
         anti_blue = rng_a.randint(1, 16)
-        all_bs = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
-        if all_bs:
-            ranked_bs = sorted(all_bs.items(), key=lambda x: x[1])
-            existing_blues = {t.get("blue", 0) for t in tickets}
-            for b, _ in ranked_bs[anti_idx:anti_idx+6]:
+        if bs_simple:
+            ranked_b = sorted(bs_simple.items(), key=lambda x: -x[1])
+            for b, _ in ranked_b:
                 if b not in existing_blues:
                     anti_blue = b
                     break
         return {
-            "red": anti_reds,
-            "blue": anti_blue,
+            "red": anti_reds, "blue": anti_blue,
             "sources": ["anti_consensus"],
             "explain": f"反共识票{anti_idx+1};红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
             "explain_json": {
-                "sources": ["anti_consensus"],
-                "strategy": f"anti_consensus_{anti_idx+1}",
+                "sources": ["anti_consensus"], "strategy": f"anti_consensus_{anti_idx+1}",
                 "red": [{"ball": int(b), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
                 "blue": {"ball": int(anti_blue), "top_agent": "anti_consensus", "top_contribution": 0.0, "agent_contributions": {}},
                 "core_pool": {"red_pool": full_anti, "blue_pool": list(range(1, 17))},
-                "diversity_replacements": [],
-                "tier_strategy": f"anti_consensus_{anti_idx+1}",
+                "diversity_replacements": [], "tier_strategy": f"anti_consensus_{anti_idx+1}",
             },
-            "diversity_replacements": [],
-            "matrix_row_id": 5 + anti_idx + 1,
+            "diversity_replacements": [], "matrix_row_id": 5 + anti_idx + 1,
         }
 
     # 4+1: 保留前4张RM票，替换最低分1张为反共识票
@@ -2309,69 +2342,8 @@ def generate_team_matrix_tickets(
             key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", [])))
         )
         tickets[sorted_indices[0]] = _build_anti_ticket(0)
-        # 将次低分票的蓝球也换成反引擎
-        if len(sorted_indices) >= 2:
-            second_worst = tickets[sorted_indices[1]]
-            all_bs = blue_engine.predict(pool_size=16)['scores'] if records and len(records) >= 5 else None
-            if all_bs:
-                ranked_bs = sorted(all_bs.items(), key=lambda x: x[1])
-                existing = {t.get("blue", 0) for t in tickets if t is not second_worst}
-                for b, _ in ranked_bs[1:9]:
-                    if b not in existing:
-                        second_worst["blue"] = b
-                        second_worst["explain"] = second_worst.get("explain", "") + f";反引擎蓝球={b:02d}"
-                        break
 
-    # 10票模式：前5张(4RM+1反共识) + 后5张(反共识+信念浓缩)
-    team_ticket_count = resolve_team_ticket_count(TEAM_TICKET_COUNT)
-    if team_ticket_count > 5:
-        extra_rng = random.Random(seed or _stable_int_seed("extra-tickets", tuple(full_pool)))
-        existing_blues = {t.get("blue", 0) for t in tickets}
-        # 额外5张：2反共识 + 3信念浓缩（从共识顶部密集采样）
-        for extra_idx in range(team_ticket_count - len(tickets)):
-            if extra_idx < 2:
-                # 反共识票3号和4号（与前2张反共识票不同种子→不同球）
-                extra_ticket = _build_anti_ticket(extra_idx + 50)
-            else:
-                # 信念浓缩票：从池子前14球高浓度采样（最大化多红同框概率）
-                top14 = full_pool[:14]
-                top_scores = {b: full_scores.get(b, 0.0) for b in top14}
-                ranked_top = sorted(top14, key=lambda b: top_scores.get(b, 0.0), reverse=True)
-                # 指数权重采样：越靠前权重越大
-                weights = [math.exp(-i * 0.5) for i in range(len(ranked_top))]
-                total_w = sum(weights)
-                extra_reds = []
-                avail = list(ranked_top)
-                w_avail = list(weights)
-                while len(extra_reds) < 6 and avail:
-                    r_val = extra_rng.random() * sum(w_avail)
-                    acc = 0.0
-                    for idx, w in enumerate(w_avail):
-                        acc += w
-                        if acc >= r_val:
-                            extra_reds.append(avail.pop(idx))
-                            w_avail.pop(idx)
-                            break
-                    else:
-                        extra_reds.append(avail.pop(-1))
-                        if w_avail:
-                            w_avail.pop(-1)
-                extra_reds.sort()
-                extra_blue = extra_rng.randint(1, 16)
-                while extra_blue in existing_blues:
-                    extra_blue = extra_rng.randint(1, 16)
-                existing_blues.add(extra_blue)
-                extra_ticket = {
-                    "red": extra_reds, "blue": extra_blue,
-                    "sources": ["conviction_hi"],
-                    "explain": f"信念浓缩票{extra_idx-1};红球={' '.join(f'{b:02d}' for b in extra_reds)};蓝球={extra_blue:02d}",
-                    "explain_json": {"sources": ["conviction_hi"], "strategy": "conviction_hi",
-                        "core_pool": {"red_pool": full_pool}, "diversity_replacements": []},
-                    "diversity_replacements": [], "matrix_row_id": 10 + extra_idx,
-                }
-            tickets.append(extra_ticket)
-
-    return tickets[:team_ticket_count]
+    return tickets[:5]
 
 
 def _generate_stratified_tickets(
@@ -2623,9 +2595,9 @@ def _apply_conviction_boost(
     best_ticket = tickets[best_idx]
     best_reds = list(best_ticket.get("red", []))
 
-    # 信念增强：替换1个低分球为高分球（强化浓度但不过度集中）
+    # 信念增强：替换最多2个低分球为高分球
     replacements = []
-    for _ in range(1):
+    for _ in range(2):
         current_reds = list(best_ticket.get("red", best_reds))
         min_score_in_ticket = min(red_scores.get(b, 0.0) for b in current_reds)
         min_ball = min(current_reds, key=lambda b: red_scores.get(b, 0.0))
