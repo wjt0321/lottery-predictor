@@ -3,14 +3,17 @@
 """预测脚本：支持单策略与多 Agent 团队协同预测。"""
 
 import argparse
+import csv
+import hashlib
 import json
 import logging
 import os
 import random
 import sys
+import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from itertools import combinations
+from itertools import combinations, product
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 import math
 
@@ -1110,10 +1113,64 @@ def _archive_file_path(target_period: str) -> str:
     return candidate
 
 
+def _canonical_json_hash(value: object, length: int = 16) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:max(8, int(length))]
+
+
+def _patch_content_hash(patch_paths: Iterable[Optional[str]], length: int = 16) -> str:
+    digest = hashlib.sha256()
+    found = False
+    normalized = sorted({os.path.abspath(path) for path in patch_paths if path and os.path.isfile(path)})
+    for path in normalized:
+        found = True
+        digest.update(os.path.basename(path).encode("utf-8", errors="replace"))
+        digest.update(b"\0")
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()[:max(8, int(length))] if found else "none"
+
+
+def _current_git_commit(project_root: Optional[str] = None) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=project_root or os.getcwd(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else "unknown"
+
+
+def build_archive_metadata(
+    runtime_config: Dict[str, object],
+    prediction_seed: Optional[int] = None,
+    patch_paths: Iterable[Optional[str]] = (),
+    git_commit: Optional[str] = None,
+) -> Dict[str, str]:
+    return {
+        "archive_schema_version": "2",
+        "runtime_config_hash": _canonical_json_hash(runtime_config),
+        "patch_config_hash": _patch_content_hash(patch_paths),
+        "prediction_seed": str(prediction_seed) if prediction_seed is not None else "none",
+        "git_commit": str(git_commit or _current_git_commit()),
+    }
+
+
 def save_compact_prediction(
     target_period: str,
     tickets: List[Dict[str, object]],
     lead_summary: str,
+    metadata: Optional[Dict[str, object]] = None,
 ) -> str:
     ensure_archive_dir()
     file_path = _archive_file_path(target_period)
@@ -1133,11 +1190,25 @@ def save_compact_prediction(
             explain_json_lines.append(
                 f"ticket{index}_explain_json={json.dumps(explain_json, ensure_ascii=False, separators=(',', ':'))}"
             )
+    metadata = metadata or {}
+    metadata_order = (
+        "archive_schema_version",
+        "runtime_config_hash",
+        "patch_config_hash",
+        "prediction_seed",
+        "git_commit",
+    )
+    metadata_lines = [
+        f"{key}={str(metadata[key]).replace(chr(10), ' ').replace(chr(13), ' ')}"
+        for key in metadata_order
+        if key in metadata
+    ]
     lines = [
         f"period={target_period}",
         f"generated_at={datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"ticket_count={len(tickets)}",
         f"lead_summary={lead_summary}",
+        *metadata_lines,
         *ticket_lines,
         *explain_lines,
         *explain_json_lines,
@@ -3814,18 +3885,104 @@ def _stability_objective(overall: Dict[str, object]) -> float:
     )
 
 
-def _stability_stats(values: List[float]) -> Dict[str, object]:
+def _percentile(values: Iterable[float], quantile: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    if len(ordered) == 1:
+        return ordered[0]
+    q = min(1.0, max(0.0, float(quantile)))
+    position = (len(ordered) - 1) * q
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def _bootstrap_mean_ci(values: List[float], iterations: int = 1000) -> Tuple[float, float]:
     if not values:
-        return {"samples": 0, "mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
-    mean = sum(values) / len(values)
-    variance = sum((value - mean) ** 2 for value in values) / len(values)
-    return {"samples": len(values), "mean": round(mean, 6), "std": round(math.sqrt(variance), 6), "min": round(min(values), 6), "max": round(max(values), 6)}
+        return 0.0, 0.0
+    if len(values) == 1 or iterations <= 0:
+        mean = sum(values) / len(values)
+        return mean, mean
+    seed = _stable_int_seed("stability-bootstrap", *(f"{value:.12g}" for value in values), iterations)
+    rng = random.Random(seed)
+    size = len(values)
+    means = []
+    for _ in range(iterations):
+        means.append(sum(values[rng.randrange(size)] for _ in range(size)) / size)
+    return _percentile(means, 0.025), _percentile(means, 0.975)
+
+
+def _stability_stats(values: List[float], bootstrap_iterations: int = 1000) -> Dict[str, object]:
+    numeric = [float(value) for value in values]
+    if not numeric:
+        return {
+            "samples": 0,
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "median": 0.0,
+            "q25": 0.0,
+            "q75": 0.0,
+            "ci95_low": 0.0,
+            "ci95_high": 0.0,
+        }
+    mean = sum(numeric) / len(numeric)
+    variance = sum((value - mean) ** 2 for value in numeric) / len(numeric)
+    ci_low, ci_high = _bootstrap_mean_ci(numeric, iterations=bootstrap_iterations)
+    return {
+        "samples": len(numeric),
+        "mean": round(mean, 6),
+        "std": round(math.sqrt(variance), 6),
+        "min": round(min(numeric), 6),
+        "max": round(max(numeric), 6),
+        "median": round(_percentile(numeric, 0.5), 6),
+        "q25": round(_percentile(numeric, 0.25), 6),
+        "q75": round(_percentile(numeric, 0.75), 6),
+        "ci95_low": round(ci_low, 6),
+        "ci95_high": round(ci_high, 6),
+    }
+
+
+def _paired_outcome_summary(deltas: List[float]) -> Dict[str, object]:
+    tolerance = 1e-12
+    positive = sum(1 for value in deltas if value > tolerance)
+    negative = sum(1 for value in deltas if value < -tolerance)
+    tied = len(deltas) - positive - negative
+    return {
+        "objective_delta": _stability_stats(deltas),
+        "dynamic_positive_ratio": round(positive / len(deltas), 6) if deltas else 0.0,
+        "positive_count": positive,
+        "negative_count": negative,
+        "tie_count": tied,
+    }
+
+
+def _group_stability_runs(runs: List[Dict[str, object]], group_key: str) -> Dict[str, object]:
+    grouped: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for run in runs:
+        grouped[str(run.get(group_key, ""))].append(run)
+    result: Dict[str, object] = {}
+    for key, group in grouped.items():
+        dynamic_values = [float(run.get("dynamic_objective", 0.0)) for run in group]
+        legacy_values = [float(run.get("legacy_objective", 0.0)) for run in group]
+        deltas = [float(run.get("objective_delta", 0.0)) for run in group]
+        result[key] = {
+            "dynamic_objective": _stability_stats(dynamic_values),
+            "legacy_objective": _stability_stats(legacy_values),
+            "paired": _paired_outcome_summary(deltas),
+        }
+    return result
 
 
 def team_stability_backtest_report(
     records: List[Dict],
-    windows: Iterable[int] = (36, 72, 144, 288),
-    seeds: Iterable[int] = (7, 42, 2026, 20260714),
+    windows: Iterable[int] = (36, 72, 108, 144),
+    seeds: Iterable[int] = (7, 42, 101, 202, 777, 2026),
     runtime_config: Optional[Dict[str, object]] = None,
     initial_weights: Optional[Dict[str, float]] = None,
     progress_callback=None,
@@ -3835,7 +3992,15 @@ def team_stability_backtest_report(
     seeds = tuple(dict.fromkeys(int(seed) for seed in seeds))
     clean_runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     runs: List[Dict[str, object]] = []
-    metric_names = ("objective", "best_of_5_avg_score", "best_of_5_hit_rate_ge2", "best_of_5_hit_rate_ge3", "best_of_5_hit_rate_ge4", "final_blue_hit_rate", "avg_overlap")
+    metric_names = (
+        "objective",
+        "best_of_5_avg_score",
+        "best_of_5_hit_rate_ge2",
+        "best_of_5_hit_rate_ge3",
+        "best_of_5_hit_rate_ge4",
+        "final_blue_hit_rate",
+        "avg_overlap",
+    )
     total = len(windows) * len(seeds)
     current = 0
     for window in windows:
@@ -3845,28 +4010,367 @@ def team_stability_backtest_report(
                 progress_callback({"current": current, "total": total, "window": window, "seed": seed})
             dynamic_runtime = _deep_merge_dict(clean_runtime, {"fusion_params": {"anti_ticket_strategy": "dynamic"}})
             legacy_runtime = _deep_merge_dict(clean_runtime, {"fusion_params": {"anti_ticket_strategy": "legacy"}})
-            dynamic = team_matrix_backtest_report(records, cycles=window, seed=seed, runtime_config=dynamic_runtime, initial_weights=initial_weights)
-            legacy = team_matrix_backtest_report(records, cycles=window, seed=seed, runtime_config=legacy_runtime, initial_weights=initial_weights)
+            dynamic = team_matrix_backtest_report(
+                records, cycles=window, seed=seed, runtime_config=dynamic_runtime,
+                initial_weights=initial_weights,
+            )
+            legacy = team_matrix_backtest_report(
+                records, cycles=window, seed=seed, runtime_config=legacy_runtime,
+                initial_weights=initial_weights,
+            )
             dynamic_overall = dynamic.get("overall", {})
             legacy_overall = legacy.get("overall", {})
             dynamic_objective = _stability_objective(dynamic_overall)
             legacy_objective = _stability_objective(legacy_overall)
-            runs.append({"window": window, "seed": seed, "dynamic": dynamic, "legacy": legacy, "dynamic_objective": dynamic_objective, "legacy_objective": legacy_objective, "objective_delta": round(dynamic_objective - legacy_objective, 6)})
+            runs.append({
+                "window": window,
+                "seed": seed,
+                "dynamic": dynamic,
+                "legacy": legacy,
+                "dynamic_objective": dynamic_objective,
+                "legacy_objective": legacy_objective,
+                "objective_delta": round(dynamic_objective - legacy_objective, 6),
+            })
 
     aggregate: Dict[str, object] = {}
     for mode in ("dynamic", "legacy"):
-        mode_runs = [run for run in runs]
         values: Dict[str, List[float]] = {name: [] for name in metric_names}
-        for run in mode_runs:
+        for run in runs:
             overall = run[mode].get("overall", {})
             values["objective"].append(float(run[f"{mode}_objective"]))
             for name in metric_names[1:]:
                 values[name].append(float(overall.get(name, 0.0)))
         aggregate[mode] = {name: _stability_stats(vals) for name, vals in values.items()}
-        aggregate[mode]["robust_score"] = round(aggregate[mode]["objective"]["mean"] - 0.5 * aggregate[mode]["objective"]["std"], 6)
+        aggregate[mode]["robust_score"] = round(
+            aggregate[mode]["objective"]["mean"] - 0.5 * aggregate[mode]["objective"]["std"], 6
+        )
     deltas = [float(run["objective_delta"]) for run in runs]
-    aggregate["paired"] = {"objective_delta": _stability_stats(deltas), "dynamic_positive_ratio": round(sum(1 for value in deltas if value > 0) / len(deltas), 6) if deltas else 0.0}
-    return {"windows": list(windows), "seeds": list(seeds), "runs": runs, "aggregate": aggregate, "guardrails": {"no_archive_write": True, "fixed_ticket_count": 5, "posthoc_tuning": False, "objective_is_comparison_only": True}}
+    aggregate["paired"] = _paired_outcome_summary(deltas)
+    aggregate["by_window"] = _group_stability_runs(runs, "window")
+    aggregate["by_seed"] = _group_stability_runs(runs, "seed")
+    return {
+        "report_schema_version": "stability-report/v2",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "windows": list(windows),
+        "seeds": list(seeds),
+        "runs": runs,
+        "aggregate": aggregate,
+        "guardrails": {
+            "no_archive_write": True,
+            "fixed_ticket_count": 5,
+            "posthoc_tuning": False,
+            "objective_is_comparison_only": True,
+        },
+    }
+
+
+def _flatten_scalar_paths(value: object, prefix: str = "") -> List[Tuple[str, object]]:
+    rows: List[Tuple[str, object]] = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_flatten_scalar_paths(value[key], child_prefix))
+    elif isinstance(value, (str, int, float, bool)) or value is None:
+        rows.append((prefix, value))
+    return rows
+
+
+def export_backtest_report(report: Dict[str, object], export_prefix: str) -> Dict[str, str]:
+    """Write a nested report as JSON plus compact run and summary CSV files."""
+    prefix = os.path.abspath(os.path.expanduser(str(export_prefix)))
+    parent = os.path.dirname(prefix)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    paths = {
+        "json": f"{prefix}.json",
+        "runs_csv": f"{prefix}.runs.csv",
+        "summary_csv": f"{prefix}.summary.csv",
+    }
+    with open(paths["json"], "w", encoding="utf-8") as handle:
+        json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
+
+    source_rows = report.get("runs") or report.get("folds") or []
+    flat_rows: List[Dict[str, object]] = []
+    for source in source_rows:
+        if not isinstance(source, dict):
+            continue
+        row: Dict[str, object] = {}
+        for path, scalar in _flatten_scalar_paths(source):
+            if path.startswith("dynamic.") or path.startswith("legacy."):
+                continue
+            row[path] = scalar
+        flat_rows.append(row)
+    fieldnames = sorted({key for row in flat_rows for key in row})
+    with open(paths["runs_csv"], "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames or ["report_schema_version"])
+        writer.writeheader()
+        if flat_rows:
+            writer.writerows(flat_rows)
+
+    summary_rows = [
+        {"path": path, "value": scalar}
+        for path, scalar in _flatten_scalar_paths(report.get("aggregate", {}), "aggregate")
+    ]
+    with open(paths["summary_csv"], "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["path", "value"])
+        writer.writeheader()
+        writer.writerows(summary_rows)
+    return paths
+
+
+def _threshold_values(values: Iterable[float], name: str, minimum: float = 0.0) -> Tuple[float, ...]:
+    cleaned = tuple(dict.fromkeys(round(float(value), 6) for value in values))
+    if not cleaned:
+        raise ValueError(f"{name} must contain at least one value")
+    if any(value < minimum for value in cleaned):
+        raise ValueError(f"{name} values must be >= {minimum}")
+    return cleaned
+
+
+def _build_threshold_candidates(
+    runtime_config: Optional[Dict[str, object]] = None,
+    one_thresholds: Iterable[float] = (0.38, 0.42, 0.46),
+    two_thresholds: Iterable[float] = (0.54, 0.58, 0.62),
+    gap_thresholds: Iterable[float] = (0.02, 0.04, 0.06),
+    grid_mode: str = "one_factor",
+) -> List[Dict[str, float]]:
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    fusion = runtime.get("fusion_params", {}) or {}
+    base = (
+        round(float(fusion.get("anti_ticket_dynamic_one_score_threshold", 0.42)), 6),
+        round(float(fusion.get("anti_ticket_dynamic_two_score_threshold", 0.58)), 6),
+        round(float(fusion.get("anti_ticket_dynamic_min_score_gap", 0.04)), 6),
+    )
+    ones = _threshold_values(one_thresholds, "one_thresholds")
+    twos = _threshold_values(two_thresholds, "two_thresholds")
+    gaps = _threshold_values(gap_thresholds, "gap_thresholds")
+    if grid_mode == "cartesian":
+        raw = list(product(ones, twos, gaps))
+    elif grid_mode == "one_factor":
+        raw = [base]
+        raw.extend((value, base[1], base[2]) for value in ones)
+        raw.extend((base[0], value, base[2]) for value in twos)
+        raw.extend((base[0], base[1], value) for value in gaps)
+    else:
+        raise ValueError("grid_mode must be 'one_factor' or 'cartesian'")
+    candidates: List[Dict[str, float]] = []
+    seen = set()
+    for one_score, two_score, min_gap in raw:
+        key = (round(float(one_score), 6), round(float(two_score), 6), round(float(min_gap), 6))
+        if key in seen or key[1] < key[0]:
+            continue
+        seen.add(key)
+        candidates.append({
+            "one_score_threshold": key[0],
+            "two_score_threshold": key[1],
+            "min_score_gap": key[2],
+        })
+    if not candidates:
+        raise ValueError("threshold grid produced no valid candidates")
+    return candidates
+
+
+def _build_rolling_calibration_folds(
+    records: List[Dict],
+    train_cycles: int = 36,
+    validation_cycles: int = 12,
+    fold_count: int = 3,
+    min_history: int = 30,
+) -> List[Dict[str, object]]:
+    train_cycles = max(1, int(train_cycles))
+    validation_cycles = max(1, int(validation_cycles))
+    fold_count = max(1, int(fold_count))
+    min_history = max(1, int(min_history))
+    timeline = list(reversed(records))
+    minimum_train_end = min_history + train_cycles
+    first_train_end = max(minimum_train_end, len(timeline) - fold_count * validation_cycles)
+    available_folds = max(0, (len(timeline) - first_train_end) // validation_cycles)
+    actual_folds = min(fold_count, available_folds)
+    folds: List[Dict[str, object]] = []
+    for index in range(actual_folds):
+        train_end = first_train_end + index * validation_cycles
+        validation_end = train_end + validation_cycles
+        train_timeline = timeline[:train_end]
+        validation_targets = timeline[train_end:validation_end]
+        validation_context = timeline[:validation_end]
+        folds.append({
+            "fold": index + 1,
+            "train_records": list(reversed(train_timeline)),
+            "validation_records": list(reversed(validation_context)),
+            "validation_targets": list(validation_targets),
+            "train_end_period": str(train_timeline[-1].get("period", "")),
+            "validation_start_period": str(validation_targets[0].get("period", "")),
+            "validation_end_period": str(validation_targets[-1].get("period", "")),
+        })
+    return folds
+
+
+def _runtime_with_thresholds(
+    runtime_config: Dict[str, object], thresholds: Dict[str, float], strategy: str = "dynamic"
+) -> Dict[str, object]:
+    return _deep_merge_dict(runtime_config, {"fusion_params": {
+        "anti_ticket_strategy": strategy,
+        "anti_ticket_dynamic_one_score_threshold": float(thresholds["one_score_threshold"]),
+        "anti_ticket_dynamic_two_score_threshold": float(thresholds["two_score_threshold"]),
+        "anti_ticket_dynamic_min_score_gap": float(thresholds["min_score_gap"]),
+    }})
+
+
+def team_threshold_calibration_report(
+    records: List[Dict],
+    train_cycles: int = 36,
+    validation_cycles: int = 12,
+    fold_count: int = 3,
+    seeds: Iterable[int] = (42,),
+    runtime_config: Optional[Dict[str, object]] = None,
+    initial_weights: Optional[Dict[str, float]] = None,
+    one_thresholds: Iterable[float] = (0.38, 0.42, 0.46),
+    two_thresholds: Iterable[float] = (0.54, 0.58, 0.62),
+    gap_thresholds: Iterable[float] = (0.02, 0.04, 0.06),
+    grid_mode: str = "one_factor",
+    evaluator=None,
+    progress_callback=None,
+) -> Dict[str, object]:
+    """Select thresholds on older prefixes and evaluate on unseen next blocks."""
+    base_runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    seeds = tuple(dict.fromkeys(int(seed) for seed in seeds))
+    if not seeds:
+        raise ValueError("calibration requires at least one seed")
+    candidates = _build_threshold_candidates(
+        base_runtime, one_thresholds, two_thresholds, gap_thresholds, grid_mode=grid_mode
+    )
+    folds = _build_rolling_calibration_folds(
+        records, train_cycles=train_cycles, validation_cycles=validation_cycles, fold_count=fold_count
+    )
+    evaluate = evaluator or team_matrix_backtest_report
+    cache: Dict[Tuple[object, ...], Dict[str, object]] = {}
+    cache_hits = 0
+    cache_misses = 0
+
+    def cached_eval(eval_records: List[Dict], cycles: int, seed: int, runtime: Dict[str, object]) -> Dict[str, object]:
+        nonlocal cache_hits, cache_misses
+        period_key = tuple(str(row.get("period", "")) for row in eval_records)
+        runtime_key = json.dumps(runtime, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        key = (period_key, int(cycles), int(seed), runtime_key)
+        if key in cache:
+            cache_hits += 1
+            return cache[key]
+        cache_misses += 1
+        cache[key] = evaluate(
+            eval_records, cycles=int(cycles), seed=int(seed), runtime_config=runtime,
+            initial_weights=initial_weights,
+        )
+        return cache[key]
+
+    base_fusion = base_runtime.get("fusion_params", {}) or {}
+    default_thresholds = {
+        "one_score_threshold": float(base_fusion.get("anti_ticket_dynamic_one_score_threshold", 0.42)),
+        "two_score_threshold": float(base_fusion.get("anti_ticket_dynamic_two_score_threshold", 0.58)),
+        "min_score_gap": float(base_fusion.get("anti_ticket_dynamic_min_score_gap", 0.04)),
+    }
+    total = len(folds) * (len(candidates) * len(seeds) + 3 * len(seeds))
+    current = 0
+    fold_reports: List[Dict[str, object]] = []
+    selected_counts: Counter = Counter()
+    for fold in folds:
+        candidate_rows = []
+        for candidate in candidates:
+            runtime = _runtime_with_thresholds(base_runtime, candidate, strategy="dynamic")
+            objectives = []
+            for seed in seeds:
+                current += 1
+                if progress_callback:
+                    progress_callback({"current": current, "total": total, "fold": fold["fold"], "phase": "train"})
+                result = cached_eval(fold["train_records"], train_cycles, seed, runtime)
+                objectives.append(_stability_objective(result.get("overall", {})))
+            stats = _stability_stats(objectives, bootstrap_iterations=0)
+            robust_score = round(float(stats["mean"]) - 0.5 * float(stats["std"]), 6)
+            distance = sum(abs(float(candidate[key]) - float(default_thresholds[key])) for key in default_thresholds)
+            candidate_rows.append({
+                "thresholds": candidate,
+                "objective": stats,
+                "robust_score": robust_score,
+                "distance_from_default": round(distance, 6),
+            })
+        selected_row = max(
+            candidate_rows,
+            key=lambda row: (float(row["robust_score"]), float(row["objective"]["mean"]), -float(row["distance_from_default"])),
+        )
+        selected = selected_row["thresholds"]
+        selected_key = json.dumps(selected, sort_keys=True, separators=(",", ":"))
+        selected_counts[selected_key] += 1
+
+        selected_runtime = _runtime_with_thresholds(base_runtime, selected, strategy="dynamic")
+        default_runtime = _runtime_with_thresholds(base_runtime, default_thresholds, strategy="dynamic")
+        legacy_runtime = _runtime_with_thresholds(base_runtime, default_thresholds, strategy="legacy")
+        # Re-read the selected training reports through the memoizer so cache use is observable.
+        selected_training_objectives = [
+            _stability_objective(cached_eval(fold["train_records"], train_cycles, seed, selected_runtime).get("overall", {}))
+            for seed in seeds
+        ]
+        validation_values = {"selected": [], "default_dynamic": [], "legacy": []}
+        for seed in seeds:
+            for label, runtime in (
+                ("selected", selected_runtime),
+                ("default_dynamic", default_runtime),
+                ("legacy", legacy_runtime),
+            ):
+                current += 1
+                if progress_callback:
+                    progress_callback({"current": current, "total": total, "fold": fold["fold"], "phase": "validation", "mode": label})
+                result = cached_eval(fold["validation_records"], len(fold["validation_targets"]), seed, runtime)
+                validation_values[label].append(_stability_objective(result.get("overall", {})))
+        validation_stats = {
+            label: _stability_stats(values, bootstrap_iterations=0)
+            for label, values in validation_values.items()
+        }
+        selected_mean = float(validation_stats["selected"]["mean"])
+        default_mean = float(validation_stats["default_dynamic"]["mean"])
+        legacy_mean = float(validation_stats["legacy"]["mean"])
+        fold_reports.append({
+            "fold": fold["fold"],
+            "train_end_period": fold["train_end_period"],
+            "validation_start_period": fold["validation_start_period"],
+            "validation_end_period": fold["validation_end_period"],
+            "train_samples": int(train_cycles),
+            "validation_samples": len(fold["validation_targets"]),
+            "selected_thresholds": dict(selected),
+            "selected_training_objective": _stability_stats(selected_training_objectives, bootstrap_iterations=0),
+            "candidate_ranking": sorted(candidate_rows, key=lambda row: (-float(row["robust_score"]), float(row["distance_from_default"]))),
+            "validation": validation_stats,
+            "selected_vs_default_delta": round(selected_mean - default_mean, 6),
+            "selected_vs_legacy_delta": round(selected_mean - legacy_mean, 6),
+        })
+
+    default_deltas = [float(fold["selected_vs_default_delta"]) for fold in fold_reports]
+    legacy_deltas = [float(fold["selected_vs_legacy_delta"]) for fold in fold_reports]
+    selection_frequency = []
+    for key, count in selected_counts.most_common():
+        selection_frequency.append({"thresholds": json.loads(key), "count": count, "ratio": round(count / len(fold_reports), 6) if fold_reports else 0.0})
+    return {
+        "report_schema_version": "threshold-calibration/v1",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "train_cycles": int(train_cycles),
+        "validation_cycles": int(validation_cycles),
+        "fold_count_requested": int(fold_count),
+        "seeds": list(seeds),
+        "grid_mode": grid_mode,
+        "candidates": candidates,
+        "folds": fold_reports,
+        "aggregate": {
+            "selected_vs_default_delta": _stability_stats(default_deltas),
+            "selected_vs_legacy_delta": _stability_stats(legacy_deltas),
+            "selection_frequency": selection_frequency,
+        },
+        "cache": {"entries": len(cache), "hits": cache_hits, "misses": cache_misses},
+        "guardrails": {
+            "expanding_window": True,
+            "future_data_in_training": False,
+            "no_archive_write": True,
+            "objective_is_comparison_only": True,
+        },
+    }
+
 
 def team_matrix_backtest_report(
     records: List[Dict],
@@ -4362,10 +4866,32 @@ def main():
                        help='运行 team-cover 实验模式回测（只读历史数据，不写归档）')
     parser.add_argument('--team-stability-backtest', action='store_true',
                        help='运行 dynamic-vs-legacy 多窗口多种子稳定性回测（只读，不写归档）')
-    parser.add_argument('--stability-windows', default='36,72,144,288',
-                       help='稳定性回测窗口，逗号分隔（默认36,72,144,288）')
-    parser.add_argument('--stability-seeds', default='7,42,2026,20260714',
+    parser.add_argument('--stability-windows', default='36,72,108,144',
+                       help='稳定性回测窗口，逗号分隔（默认36,72,108,144）')
+    parser.add_argument('--stability-seeds', default='7,42,101,202,777,2026',
                        help='稳定性回测随机种子，逗号分隔')
+    parser.add_argument('--stability-export-prefix', default=None,
+                       help='稳定性报告导出前缀；写入 JSON、runs.csv 和 summary.csv')
+    parser.add_argument('--team-threshold-calibration', action='store_true',
+                       help='运行动态偏移阈值的扩展窗口校准（只读，不写归档）')
+    parser.add_argument('--calibration-train-cycles', type=int, default=36,
+                       help='每个校准折用于选择阈值的训练回测期数（默认36）')
+    parser.add_argument('--calibration-validation-cycles', type=int, default=12,
+                       help='每个校准折的后续未见验证期数（默认12）')
+    parser.add_argument('--calibration-folds', type=int, default=3,
+                       help='扩展窗口校准折数（默认3）')
+    parser.add_argument('--calibration-seeds', default='42',
+                       help='校准随机种子，逗号分隔（默认42）')
+    parser.add_argument('--calibration-one-thresholds', default='0.38,0.42,0.46',
+                       help='单偏移分数阈值候选，逗号分隔')
+    parser.add_argument('--calibration-two-thresholds', default='0.54,0.58,0.62',
+                       help='双偏移分数阈值候选，逗号分隔')
+    parser.add_argument('--calibration-gap-thresholds', default='0.02,0.04,0.06',
+                       help='最小分数差候选，逗号分隔')
+    parser.add_argument('--calibration-grid-mode', choices=['one_factor', 'cartesian'], default='one_factor',
+                       help='阈值网格：one_factor=单因素邻域（默认），cartesian=全组合')
+    parser.add_argument('--calibration-export-prefix', default=None,
+                       help='校准报告导出前缀；写入 JSON、runs.csv 和 summary.csv')
     parser.add_argument('--backtest-cycles', type=int, default=36,
                        help='team 端到端矩阵回测期数（默认36期）')
     parser.add_argument('--backtest-use-current-patches', action='store_true',
@@ -4397,7 +4923,7 @@ def main():
     stale, stale_detail = is_data_stale(records[0]['date'])
     if stale:
         # 回测模式只读历史数据，允许在数据过期时继续运行
-        if not args.team_backtest and not args.team_cover_backtest and not args.team_stability_backtest:
+        if not args.team_backtest and not args.team_cover_backtest and not args.team_stability_backtest and not args.team_threshold_calibration:
             print("\n⚠️ 本地开奖数据已落后于最近应开奖期，已停止本次预测。")
             print(f"📌 本地最新开奖日: {stale_detail['latest_record_date']}")
             print(f"📌 应有最新开奖日: {stale_detail['expected_latest_draw_date']}")
@@ -4416,6 +4942,78 @@ def main():
     print("\n" + "=" * 60)
     print("🎯 预测号码")
     print("=" * 60)
+
+    if args.team_threshold_calibration:
+        runtime_config, initial_weights, patch_source = resolve_backtest_priors(
+            args.backtest_use_current_patches, args.weight_patch
+        )
+        try:
+            calibration_seeds = [int(value.strip()) for value in str(args.calibration_seeds).split(",") if value.strip()]
+            one_thresholds = [float(value.strip()) for value in str(args.calibration_one_thresholds).split(",") if value.strip()]
+            two_thresholds = [float(value.strip()) for value in str(args.calibration_two_thresholds).split(",") if value.strip()]
+            gap_thresholds = [float(value.strip()) for value in str(args.calibration_gap_thresholds).split(",") if value.strip()]
+        except ValueError:
+            parser.error("校准 seeds 必须是整数，阈值候选必须是逗号分隔的数字")
+        if not calibration_seeds or not one_thresholds or not two_thresholds or not gap_thresholds:
+            parser.error("校准至少需要一个 seed 和每类至少一个阈值候选")
+        if args.calibration_train_cycles <= 0 or args.calibration_validation_cycles <= 0 or args.calibration_folds <= 0:
+            parser.error("校准训练期数、验证期数和折数必须大于0")
+        print(f"\n🧪 动态阈值滚动校准先验: {patch_source}（默认 clean）")
+
+        def _print_calibration_progress(update: Dict[str, object]) -> None:
+            print(
+                f"\r⏳ calibration: {int(update.get('current', 0))}/{int(update.get('total', 0))} "
+                f"| fold={update.get('fold')} | phase={update.get('phase')}",
+                end="", flush=True,
+            )
+
+        try:
+            report = team_threshold_calibration_report(
+                records,
+                train_cycles=args.calibration_train_cycles,
+                validation_cycles=args.calibration_validation_cycles,
+                fold_count=args.calibration_folds,
+                seeds=calibration_seeds,
+                runtime_config=runtime_config,
+                initial_weights=initial_weights,
+                one_thresholds=one_thresholds,
+                two_thresholds=two_thresholds,
+                gap_thresholds=gap_thresholds,
+                grid_mode=args.calibration_grid_mode,
+                progress_callback=_print_calibration_progress,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        print("\n\n📊 动态偏移阈值滚动校准:")
+        if not report["folds"]:
+            print("  - 数据不足，无法构造训练/验证折。")
+        for fold in report["folds"]:
+            thresholds = fold["selected_thresholds"]
+            print(
+                f"  - fold={fold['fold']} train<= {fold['train_end_period']} "
+                f"validate={fold['validation_start_period']}..{fold['validation_end_period']} | "
+                f"one={thresholds['one_score_threshold']:.3f} "
+                f"two={thresholds['two_score_threshold']:.3f} gap={thresholds['min_score_gap']:.3f} | "
+                f"vs-default={fold['selected_vs_default_delta']:+.4f} "
+                f"vs-legacy={fold['selected_vs_legacy_delta']:+.4f}"
+            )
+        aggregate = report["aggregate"]
+        print(
+            f"  - 验证集相对默认动态均值 "
+            f"{float(aggregate['selected_vs_default_delta']['mean']):+.4f} "
+            f"95%CI [{float(aggregate['selected_vs_default_delta']['ci95_low']):+.4f}, "
+            f"{float(aggregate['selected_vs_default_delta']['ci95_high']):+.4f}]"
+        )
+        if args.calibration_export_prefix:
+            paths = export_backtest_report(report, args.calibration_export_prefix)
+            print(f"  - JSON: {paths['json']}")
+            print(f"  - runs CSV: {paths['runs_csv']}")
+            print(f"  - summary CSV: {paths['summary_csv']}")
+        print("  - 说明: 每折只用更早数据选择阈值，再在紧随其后的未见区间验证。")
+        print("\n" + "=" * 60)
+        print("⚠️ 仅供娱乐，不构成投注建议！")
+        print("=" * 60)
+        return
 
     if args.team_stability_backtest:
         runtime_config, initial_weights, patch_source = resolve_backtest_priors(
@@ -4460,6 +5058,17 @@ def main():
             f"最差 {aggregate['paired']['objective_delta']['min']:+.4f} | "
             f"最好 {aggregate['paired']['objective_delta']['max']:+.4f}"
         )
+        paired_stats = aggregate["paired"]["objective_delta"]
+        print(
+            f"  - 中位数 {float(paired_stats.get('median', 0.0)):+.4f} | "
+            f"四分位 [{float(paired_stats.get('q25', 0.0)):+.4f}, {float(paired_stats.get('q75', 0.0)):+.4f}] | "
+            f"95%CI [{float(paired_stats.get('ci95_low', 0.0)):+.4f}, {float(paired_stats.get('ci95_high', 0.0)):+.4f}]"
+        )
+        if args.stability_export_prefix:
+            paths = export_backtest_report(report, args.stability_export_prefix)
+            print(f"  - JSON: {paths['json']}")
+            print(f"  - runs CSV: {paths['runs_csv']}")
+            print(f"  - summary CSV: {paths['summary_csv']}")
         print("  - 说明: 综合目标仅用于固定规则的离线比较；不代表中奖概率，也不进行事后调参。")
         print("\n" + "=" * 60)
         print("⚠️ 仅供娱乐，不构成投注建议！")
@@ -4700,7 +5309,12 @@ def main():
             patch_source=patch_source,
             mode="team_cover",
         )
-        saved_path = save_compact_prediction(target_period, final_tickets, summary)
+        archive_metadata = build_archive_metadata(
+            runtime_config,
+            prediction_seed=args.seed,
+            patch_paths=(resolved_patch_path, param_patch_path, matrix_patch_path),
+        )
+        saved_path = save_compact_prediction(target_period, final_tickets, summary, metadata=archive_metadata)
         print(f"\n💾 已归档本期精简预测: {saved_path}")
     elif args.mode == 'team':
         latest_archive = load_latest_archive()
@@ -4785,7 +5399,12 @@ def main():
             source_text = ",".join(sources) if sources else "fallback"
             print(f"  第{i+1}注: 红球 {' '.join([f'{b:02d}' for b in red])} + 蓝球 {blue:02d} | 来源 {source_text}")
         summary = build_archive_lead_summary(diff_factor, lead_report, patch_source=patch_source)
-        saved_path = save_compact_prediction(target_period, final_tickets, summary)
+        archive_metadata = build_archive_metadata(
+            runtime_config,
+            prediction_seed=args.seed,
+            patch_paths=(resolved_patch_path, param_patch_path, matrix_patch_path),
+        )
+        saved_path = save_compact_prediction(target_period, final_tickets, summary, metadata=archive_metadata)
         print(f"\n💾 已归档本期精简预测: {saved_path}")
     else:
         strategies = ['hot', 'cold', 'missing', 'balanced', 'random', 'cycle', 'sum', 'zone'] if args.all else [args.strategy]

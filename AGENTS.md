@@ -72,7 +72,7 @@ run_team_mode()
   └── _archive_prediction()        # write archive
 ```
 
-Backtest entry points: `team_matrix_backtest_report()` / `team_cover_backtest_report()` / `team_stability_backtest_report()`
+Backtest entry points: `team_matrix_backtest_report()` / `team_cover_backtest_report()` / `team_stability_backtest_report()` / `team_threshold_calibration_report()`
 
 ## Configuration System
 
@@ -116,20 +116,21 @@ Missing patch files do not block prediction — system falls back gracefully.
 - Repo maintainer notes: `AGENT.md`
 - Claude Code entry: `CLAUDE.md`
 - Skill trigger guide: `SKILL.md`
-- Current iteration plan: `docs/plans/2026-05-16-hit-rate-improvement-iteration-plan.md`
+- Current iteration plan: `docs/plans/2026-07-14-v7-stability-calibration-implementation-plan.md`
 - Historical design docs: `docs/plans/`
 
 ## Current Behavior
 
 - `team` mode always outputs `5` tickets of `6+1`; ticket 5 uses `dynamic_offset_0/1/2` by default
 - Flow is expert proposals -> `build_core_pool_snapshot()` -> full-33 debate scores -> matrix tickets -> dynamic constrained offset decision
-- `team-cover` mode also outputs `5` tickets, writes compact archive output, and marks `lead_summary.mode=team_cover`
+- `team-cover` mode also outputs `5` tickets, writes compact archive output, marks `lead_summary.mode=team_cover`, and appends schema/runtime/patch/seed/commit provenance keys
 - Position weights now affect core-pool scoring, not just row-local ordering
 - `blue_params` flows into `BlueBallEngine` and can be overridden by `param patch`
 - `row_weights` affects default matrix row order; current semantics are dynamic ordering, not dynamic elimination
 - `--team-backtest` prints progress and reports final 5-ticket metrics, counterfactual offset attribution, blue-rank calibration, and average ticket overlap
 - `--team-cover-backtest` prints three-way comparison metrics for `team_cover`, `team`, and `conditional_random`, and does not write archives
-- `--team-stability-backtest` pairs dynamic and legacy across windows/seeds, reports objective volatility and robust score, and does not write archives
+- `--team-stability-backtest` pairs dynamic and legacy across windows/seeds, reports quantiles/bootstrap CI/grouped outcomes and robust score, can export JSON/CSV, and does not write archives
+- `--team-threshold-calibration` uses expanding training prefixes and the immediately following unseen validation blocks; it can export JSON/CSV and never auto-writes a param patch
 - Backtests default to clean runtime config and no archive-derived weight prior; `--backtest-use-current-patches` is an explicit offline sensitivity experiment
 
 ## Hard Constraints
@@ -137,7 +138,7 @@ Missing patch files do not block prediction — system falls back gracefully.
 - Do not describe the project as an investment or guaranteed-winning tool
 - Do not bypass stale-data protection unless the user explicitly wants offline experiments
 - Do not overwrite an existing archive for the same period; re-predictions must use timestamped filenames (`YYYYXXX_timestamp.txt`)
-- Do not change `team-cover` archive format silently; keep the existing compact archive format unless a separate experiment archive design is requested
+- Keep `team-cover` compact KV archive compatibility; V7 additive provenance keys are documented, but existing ticket/explain/lead-summary lines must not change silently
 - Do not revert `team` mode to random ticket splitting or variable ticket counts without discussion
 - Do not restore `LSTM/TensorFlow` or the `lstm` expert unless explicitly requested
 
@@ -152,7 +153,8 @@ python predict.py --mode team-cover --num 5 --seed 42
 # Backtests
 python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
-python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42
+python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --stability-seeds 7,42,101,202,777,2026 --stability-export-prefix prediction_archive/stability_report
+python predict.py --team-threshold-calibration --calibration-train-cycles 36 --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 --calibration-export-prefix prediction_archive/threshold_calibration
 # Offline sensitivity experiment only:
 python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 

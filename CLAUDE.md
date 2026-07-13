@@ -79,7 +79,8 @@ main() → run_team_mode()
 --team-cover-backtest → team_cover_backtest_report()
   └── 三链路并排: team_cover / team / conditional_random → uplift 对比
 
---team-stability-backtest → team_stability_backtest_report()
+--team-stability-backtest → team_stability_backtest_report() → optional JSON/CSV export
+--team-threshold-calibration → team_threshold_calibration_report() → expanding-window validation → optional JSON/CSV export
   └── 多窗口多seed配对 dynamic / legacy → 目标差、波动、稳健分
 ```
 
@@ -164,7 +165,8 @@ python predict.py --mode team-cover --num 5 --seed 42
 # 回测
 python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
-python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42
+python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --stability-seeds 7,42,101,202,777,2026 --stability-export-prefix prediction_archive/stability_report
+python predict.py --team-threshold-calibration --calibration-train-cycles 36 --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 --calibration-export-prefix prediction_archive/threshold_calibration
 # Offline sensitivity experiment only:
 python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 
@@ -185,5 +187,6 @@ python -m unittest test_predict -v
 - 改专家集合：同步 `predict.py`、`analyze_archive.py`、`agent_registry.py`、`README.md`、`SKILL.md`
 - 改 CLI / 输出 / 补丁行为：同步 `README.md`、`SKILL.md`、`AGENTS.md`、`CLAUDE.md`
 - 改 `project_config.py`：同步检查 `blue_ball_engine.py`、`to_runtime_config()` 输出、`param_patch` 回灌路径
-- 改回测口径：同步检查 `README.md` 中的命令示例、反事实字段、蓝球校准与 stability 指标描述
+- 改回测口径：同步检查 `README.md` 中的命令示例、反事实字段、蓝球校准、stability 置信区间/导出和 rolling calibration 描述
+- 改预测归档：保留 compact KV 的 ticket/explain/lead_summary 兼容性，并同步 schema/runtime/patch/seed/commit 元数据说明
 - 改 `BlueBallEngine` 参数：同步 `project_config.py` 的 `blue_*` 字段和 `to_runtime_config()[“blue_params”]`
