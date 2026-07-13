@@ -2404,13 +2404,20 @@ def _select_scientific_offset_reds(
     records: List[Dict],
     runtime_config: Optional[Dict[str, object]] = None,
     seed: Optional[int] = None,
+    offset_count: Optional[int] = None,
 ) -> Optional[Dict[str, object]]:
-    """Select two evidence-backed offset reds under structural constraints."""
+    """Select one or two evidence-backed offset reds under structural constraints.
+
+    ``offset_count`` is explicit for dynamic mode.  When omitted, the legacy
+    fixed-scientific configuration value is used, preserving the old API.
+    The selector deliberately returns enough diagnostics for an upstream
+    policy to decide whether the evidence justifies 0/1/2 offsets.
+    """
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     fusion = runtime.get("fusion_params", {}) or {}
-    anti_count = max(0, min(6, int(fusion.get("anti_ticket_red_count", 2))))
-    if anti_count != 2 or len(profiles) < 2:
-        return None
+    configured_count = int(fusion.get("anti_ticket_red_count", 2))
+    anti_count = configured_count if offset_count is None else int(offset_count)
+    anti_count = max(0, min(2, anti_count))
 
     base_ranked = sorted(
         dict.fromkeys(int(ball) for ball in base_reds if 1 <= int(ball) <= 33),
@@ -2421,12 +2428,43 @@ def _select_scientific_offset_reds(
         return None
     kept_core = base_ranked[:keep_count]
     kept_set = set(kept_core)
+
+    if anti_count == 0:
+        return {
+            "red": sorted(kept_core),
+            "kept_core": sorted(kept_core),
+            "offset_reds": [],
+            "score": 0.0,
+            "best_score": 0.0,
+            "runner_up_score": 0.0,
+            "score_gap": 0.0,
+            "evidence_coverage": 0.0,
+            "evidence_agent_count": 0,
+            "score_breakdown": {
+                "counter_evidence": 0.0,
+                "coverage": 0.0,
+                "structure": 1.0,
+                "uncertainty": 0.0,
+            },
+            "score_weights": {},
+            "constraints": {
+                "zone_count": len({_red_zone(ball) for ball in kept_core}),
+                "odd_count": sum(1 for ball in kept_core if ball % 2 == 1),
+                "sum": sum(kept_core),
+                "sum_low": None,
+                "sum_high": None,
+                "max_overlap": 0,
+                "sum_relaxed": False,
+            },
+            "selected_profiles": [],
+        }
+
     usable_profiles = [
         row for row in profiles
         if 1 <= int(row.get("ball", 0) or 0) <= 33
         and int(row.get("ball", 0) or 0) not in kept_set
     ]
-    if len(usable_profiles) < 2:
+    if len(usable_profiles) < anti_count:
         return None
 
     max_overlap = max(0, min(6, int(fusion.get("anti_ticket_max_overlap", 4))))
@@ -2444,8 +2482,8 @@ def _select_scientific_offset_reds(
     weights = {key: max(0.0, value) / weight_total for key, value in weights.items()}
     other_red_sets = [set(int(ball) for ball in ticket.get("red", []) or []) for ticket in existing_tickets]
 
-    def evaluate_pair(pair: Tuple[Dict[str, object], Dict[str, object]], enforce_sum: bool) -> Optional[Dict[str, object]]:
-        offset_reds = sorted(int(row["ball"]) for row in pair)
+    def evaluate_combination(rows: Tuple[Dict[str, object], ...], enforce_sum: bool) -> Optional[Dict[str, object]]:
+        offset_reds = sorted(int(row["ball"]) for row in rows)
         final_reds = sorted(kept_core + offset_reds)
         if len(final_reds) != 6 or len(set(final_reds)) != 6:
             return None
@@ -2459,15 +2497,16 @@ def _select_scientific_offset_reds(
         if enforce_sum and not sum_low <= red_sum <= sum_high:
             return None
 
-        counter_evidence = sum(float(row.get("counter_evidence", 0.0)) for row in pair) / 2.0
-        uncertainty = sum(float(row.get("disagreement", 0.0)) for row in pair) / 2.0
+        counter_evidence = sum(float(row.get("counter_evidence", 0.0)) for row in rows) / anti_count
+        uncertainty = sum(float(row.get("disagreement", 0.0)) for row in rows) / anti_count
         evidence_agents = {
             str(agent)
-            for row in pair
+            for row in rows
             for agent in row.get("standout_agents", []) or []
         }
-        offset_zone_diversity = 1.0 if _red_zone(offset_reds[0]) != _red_zone(offset_reds[1]) else 0.0
-        numeric_spread = abs(offset_reds[1] - offset_reds[0]) / 32.0
+        offset_zones = {_red_zone(ball) for ball in offset_reds}
+        offset_zone_diversity = len(offset_zones) / 3.0
+        numeric_spread = (max(offset_reds) - min(offset_reds)) / 32.0 if len(offset_reds) > 1 else 0.5
         evidence_coverage = len(evidence_agents) / len(_OFFSET_EVIDENCE_AGENTS)
         coverage = min(1.0, evidence_coverage * 0.50 + offset_zone_diversity * 0.30 + numeric_spread * 0.20)
 
@@ -2483,7 +2522,7 @@ def _select_scientific_offset_reds(
             "uncertainty": round(uncertainty, 6),
         }
         total_score = sum(breakdown[key] * weights[key] for key in weights)
-        tie_break = _stable_int_seed("scientific-offset-pair", seed or 0, tuple(offset_reds))
+        tie_break = _stable_int_seed("scientific-offset-combination", seed or 0, tuple(offset_reds))
         return {
             "red": final_reds,
             "kept_core": sorted(kept_core),
@@ -2491,6 +2530,8 @@ def _select_scientific_offset_reds(
             "score": round(float(total_score), 6),
             "score_breakdown": breakdown,
             "score_weights": {key: round(value, 6) for key, value in weights.items()},
+            "evidence_coverage": round(evidence_coverage, 6),
+            "evidence_agent_count": len(evidence_agents),
             "constraints": {
                 "zone_count": zone_count,
                 "odd_count": odd_count,
@@ -2500,14 +2541,14 @@ def _select_scientific_offset_reds(
                 "max_overlap": max_actual_overlap,
                 "sum_relaxed": not enforce_sum,
             },
-            "selected_profiles": [dict(row) for row in pair],
+            "selected_profiles": [dict(row) for row in rows],
             "_tie_break": tie_break,
         }
 
     evaluated: List[Dict[str, object]] = []
     for enforce_sum in (True, False):
-        for pair in combinations(usable_profiles, 2):
-            candidate = evaluate_pair(pair, enforce_sum=enforce_sum)
+        for combination in combinations(usable_profiles, anti_count):
+            candidate = evaluate_combination(combination, enforce_sum=enforce_sum)
             if candidate is not None:
                 evaluated.append(candidate)
         if evaluated:
@@ -2522,8 +2563,58 @@ def _select_scientific_offset_reds(
         )
     )
     selected = dict(evaluated[0])
+    best_score = float(selected.get("score", 0.0))
+    runner_up_score = float(evaluated[1].get("score", best_score)) if len(evaluated) > 1 else best_score
+    selected["best_score"] = round(best_score, 6)
+    selected["runner_up_score"] = round(runner_up_score, 6)
+    selected["score_gap"] = round(max(0.0, best_score - runner_up_score), 6)
     selected.pop("_tie_break", None)
     return selected
+
+
+def _choose_dynamic_offset_plan(
+    selections: Dict[int, Optional[Dict[str, object]]],
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    """Choose 0/1/2 offsets from precomputed scientific selections."""
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    fusion = runtime.get("fusion_params", {}) or {}
+    one_threshold = float(fusion.get("anti_ticket_dynamic_one_score_threshold", 0.42))
+    two_threshold = float(fusion.get("anti_ticket_dynamic_two_score_threshold", 0.58))
+    min_gap = float(fusion.get("anti_ticket_dynamic_min_score_gap", 0.04))
+    one_coverage = int(fusion.get("anti_ticket_dynamic_one_min_coverage", 1))
+    two_coverage = int(fusion.get("anti_ticket_dynamic_two_min_coverage", 2))
+
+    def _coverage(selection: Optional[Dict[str, object]]) -> int:
+        if not selection:
+            return 0
+        if "evidence_agent_count" in selection:
+            return int(selection.get("evidence_agent_count", 0) or 0)
+        return int(round(float(selection.get("evidence_coverage", 0.0) or 0.0) * len(_OFFSET_EVIDENCE_AGENTS)))
+
+    def _gap(selection: Optional[Dict[str, object]]) -> float:
+        if not selection:
+            return 0.0
+        if "score_gap" in selection:
+            return float(selection.get("score_gap", 0.0) or 0.0)
+        return max(0.0, float(selection.get("best_score", selection.get("score", 0.0)) or 0.0) - float(selection.get("runner_up_score", 0.0) or 0.0))
+
+    def _sum_relaxed(selection: Optional[Dict[str, object]]) -> bool:
+        return bool((selection or {}).get("constraints", {}).get("sum_relaxed", False))
+
+    two = selections.get(2)
+    if two:
+        two_score = float(two.get("best_score", two.get("score", 0.0)) or 0.0)
+        if two_score >= two_threshold and _gap(two) >= min_gap and _coverage(two) >= two_coverage and not _sum_relaxed(two):
+            return {"offset_count": 2, "selection": two, "reason": "two_offsets_high_confidence", "threshold": two_threshold, "score": round(two_score, 6), "score_gap": round(_gap(two), 6), "evidence_agent_count": _coverage(two)}
+
+    one = selections.get(1)
+    if one:
+        one_score = float(one.get("best_score", one.get("score", 0.0)) or 0.0)
+        if one_score >= one_threshold and _coverage(one) >= one_coverage:
+            return {"offset_count": 1, "selection": one, "reason": "one_offset_base_confidence", "threshold": one_threshold, "score": round(one_score, 6), "score_gap": round(_gap(one), 6), "evidence_agent_count": _coverage(one)}
+
+    return {"offset_count": 0, "selection": None, "reason": "no_sufficient_evidence", "threshold": one_threshold, "score": 0.0, "score_gap": 0.0, "evidence_agent_count": 0}
 
 
 def _mix_anti_consensus_reds(
@@ -2710,91 +2801,72 @@ def generate_team_matrix_tickets(
             "matrix_row_id": 5 + anti_idx + 1,
         }
 
+    def _counterfactual_ticket(base_ticket: Dict[str, object]) -> Dict[str, object]:
+        blue = int(base_ticket.get("blue", 0) or 0)
+        return {
+            "red": sorted(int(ball) for ball in base_ticket.get("red", []) or []),
+            "blue": blue,
+            "blue_score": float(base_ticket.get("blue_score", (snapshot.get("blue_scores_full", {}) or {}).get(blue, 0.0))),
+            "matrix_row_id": int(base_ticket.get("matrix_row_id", 0) or 0),
+        }
+
     def _build_scientific_offset_ticket(
         anti_idx: int,
         base_ticket: Dict[str, object],
         other_tickets: List[Dict[str, object]],
+        offset_count: int,
+        selection: Optional[Dict[str, object]] = None,
+        strategy_prefix: str = "scientific",
+        candidate_profiles: Optional[List[Dict[str, object]]] = None,
     ) -> Optional[Dict[str, object]]:
-        profiles = _build_offset_candidate_profiles(
-            full_anti,
-            records or [],
-            lead_model,
-            snapshot,
-            runtime_config=runtime,
+        profiles = candidate_profiles if candidate_profiles is not None else _build_offset_candidate_profiles(
+            full_anti, records or [], lead_model, snapshot, runtime_config=runtime
         )
-        selection = _select_scientific_offset_reds(
-            list(base_ticket.get("red", [])),
-            profiles,
-            full_scores,
-            existing_tickets=other_tickets,
-            records=records or [],
-            runtime_config=runtime,
-            seed=seed,
-        )
+        if selection is None:
+            selection = _select_scientific_offset_reds(
+                list(base_ticket.get("red", [])), profiles, full_scores, existing_tickets=other_tickets, records=records or [], runtime_config=runtime, seed=seed, offset_count=offset_count
+            )
         if not selection:
             return None
         offset_reds = set(int(ball) for ball in selection.get("offset_reds", []) or [])
         final_reds = [int(ball) for ball in selection.get("red", []) or []]
-        if len(final_reds) != 6 or len(set(final_reds)) != 6:
+        if len(final_reds) != 6 or len(set(final_reds)) != 6 or len(offset_reds) != offset_count:
             return None
-        offset_seed = seed or _stable_int_seed("scientific-offset-blue", tuple(final_reds))
-        rng = random.Random(offset_seed)
+        rng = random.Random(seed or _stable_int_seed("scientific-offset-blue", tuple(final_reds)))
         blue = _select_offset_blue(other_tickets, rng)
-        strategy = f"scientific_offset_{len(offset_reds)}"
+        strategy = f"{strategy_prefix}_offset_{len(offset_reds)}"
+        original_matrix = _counterfactual_ticket(base_ticket)
+        red_agent_contrib = snapshot.get("red_agent_contrib", {}) or {}
+        blue_score = float((snapshot.get("blue_scores_full", {}) or {}).get(blue, 0.0))
         offset_detail = {
             "candidate_profiles": profiles,
             "kept_core": list(selection.get("kept_core", [])),
             "selected_offset_reds": sorted(offset_reds),
             "score": float(selection.get("score", 0.0)),
+            "best_score": float(selection.get("best_score", selection.get("score", 0.0))),
+            "runner_up_score": float(selection.get("runner_up_score", selection.get("score", 0.0))),
+            "score_gap": float(selection.get("score_gap", 0.0)),
+            "evidence_coverage": float(selection.get("evidence_coverage", 0.0)),
+            "evidence_agent_count": int(selection.get("evidence_agent_count", 0) or 0),
             "score_breakdown": dict(selection.get("score_breakdown", {})),
             "score_weights": dict(selection.get("score_weights", {})),
             "constraints": dict(selection.get("constraints", {})),
             "selected_profiles": list(selection.get("selected_profiles", [])),
             "replaced_matrix_row_id": base_ticket.get("matrix_row_id"),
         }
-        red_agent_contrib = snapshot.get("red_agent_contrib", {}) or {}
         return {
-            "red": sorted(final_reds),
-            "blue": blue,
-            "sources": ["scientific_offset"],
-            "explain": (
-                f"科学偏移票{anti_idx + 1};保留核心="
-                f"{' '.join(f'{ball:02d}' for ball in offset_detail['kept_core'])};"
-                f"偏移红球={' '.join(f'{ball:02d}' for ball in sorted(offset_reds))};"
-                f"组合分={float(selection.get('score', 0.0)):.3f};蓝球={blue:02d}"
-            ),
+            "red": sorted(final_reds), "blue": blue, "blue_score": blue_score, "sources": ["scientific_offset"],
+            "counterfactual_ticket": original_matrix,
+            "explain": f"科学偏移票{anti_idx + 1};保留核心={' '.join(f'{ball:02d}' for ball in offset_detail['kept_core'])};偏移红球={' '.join(f'{ball:02d}' for ball in sorted(offset_reds))};组合分={float(selection.get('score', 0.0)):.3f};蓝球={blue:02d}",
             "explain_json": {
-                "sources": ["scientific_offset"],
-                "strategy": strategy,
-                "red": [
-                    {
-                        "ball": int(ball),
-                        "top_agent": "offset" if ball in offset_reds else "model",
-                        "top_contribution": 0.0,
-                        "agent_contributions": {
-                            str(agent): round(float(value), 6)
-                            for agent, value in (red_agent_contrib.get(ball, {}) or {}).items()
-                        },
-                    }
-                    for ball in sorted(final_reds)
-                ],
-                "blue": {
-                    "ball": int(blue),
-                    "top_agent": "blue_engine",
-                    "top_contribution": round(float((snapshot.get("blue_scores_full", {}) or {}).get(blue, 0.0)), 6),
-                    "agent_contributions": {},
-                },
-                "core_pool": {
-                    "red_pool": list(full_pool[:22]),
-                    "blue_pool": list(snapshot.get("blue_pool", []) or []),
-                },
-                "offset_strategy": offset_detail,
-                "diversity_replacements": [],
-                "tier_strategy": strategy,
-                "replaced_matrix_row_id": base_ticket.get("matrix_row_id"),
+                "sources": ["scientific_offset"], "strategy": strategy,
+                "red": [{"ball": int(ball), "top_agent": "offset" if ball in offset_reds else "model", "top_contribution": 0.0, "agent_contributions": {str(agent): round(float(value), 6) for agent, value in (red_agent_contrib.get(ball, {}) or {}).items()}} for ball in sorted(final_reds)],
+                "blue": {"ball": int(blue), "blue_score": round(blue_score, 6), "top_agent": "blue_engine", "top_contribution": round(blue_score, 6), "agent_contributions": {}},
+                "blue_score": round(blue_score, 6),
+                "core_pool": {"red_pool": list(full_pool[:22]), "blue_pool": list(snapshot.get("blue_pool", []) or [])},
+                "offset_strategy": offset_detail, "counterfactual_ticket": original_matrix, "diversity_replacements": [], "tier_strategy": strategy, "replaced_matrix_row_id": base_ticket.get("matrix_row_id"),
             },
-            "diversity_replacements": [],
-            "matrix_row_id": int(base_ticket.get("matrix_row_id", 0) or 0),
+            "diversity_replacements": [], "matrix_row_id": int(base_ticket.get("matrix_row_id", 0) or 0),
         }
 
     if len(tickets) >= 5:
@@ -2807,12 +2879,61 @@ def generate_team_matrix_tickets(
         base_ticket = tickets[weakest_idx]
         other_tickets = [ticket for index, ticket in enumerate(tickets) if index != weakest_idx]
         replacement = None
-        if anti_strategy == "scientific":
-            replacement = _build_scientific_offset_ticket(0, base_ticket, other_tickets)
+
+        if anti_strategy == "dynamic":
+            profiles = _build_offset_candidate_profiles(full_anti, records or [], lead_model, snapshot, runtime_config=runtime)
+            selections = {
+                count: _select_scientific_offset_reds(
+                    list(base_ticket.get("red", [])), profiles, full_scores, existing_tickets=other_tickets,
+                    records=records or [], runtime_config=runtime, seed=seed, offset_count=count,
+                )
+                for count in (1, 2)
+            }
+            plan = _choose_dynamic_offset_plan(selections, runtime_config=runtime)
+            offset_count = int(plan.get("offset_count", 0) or 0)
+            if offset_count:
+                replacement = _build_scientific_offset_ticket(
+                    0, base_ticket, other_tickets, offset_count=offset_count,
+                    selection=plan.get("selection"), strategy_prefix="dynamic", candidate_profiles=profiles,
+                )
+                if replacement and isinstance(replacement.get("explain_json"), dict):
+                    replacement["explain_json"]["dynamic_offset_plan"] = {key: value for key, value in plan.items() if key != "selection"}
+            if replacement is None:
+                original_matrix = _counterfactual_ticket(base_ticket)
+                replacement = dict(base_ticket)
+                replacement["red"] = list(original_matrix["red"])
+                replacement["blue"] = original_matrix["blue"]
+                replacement["blue_score"] = original_matrix["blue_score"]
+                replacement["counterfactual_ticket"] = original_matrix
+                explain_json = dict(replacement.get("explain_json") or {})
+                explain_json.update({
+                    "strategy": "dynamic_offset_0",
+                    "tier_strategy": "dynamic_offset_0",
+                    "counterfactual_ticket": original_matrix,
+                    "dynamic_offset_plan": plan,
+                    "blue_score": round(float(original_matrix["blue_score"]), 6),
+                })
+                replacement["explain_json"] = explain_json
+                replacement["explain"] = f"动态科学偏移票1;偏移红球=无;保留原矩阵票;原因={plan.get('reason', 'no_sufficient_evidence')}"
+                replacement["sources"] = list(dict.fromkeys(list(replacement.get("sources", []) or []) + ["dynamic_offset"]))
+        elif anti_strategy == "scientific":
+            replacement = _build_scientific_offset_ticket(
+                0, base_ticket, other_tickets, offset_count=max(0, min(2, anti_red_count)),
+            )
         if replacement is None:
             replacement = _build_legacy_anti_ticket(0, base_ticket)
         tickets.pop(weakest_idx)
         tickets.append(replacement)
+
+    # Every final ticket exposes one comparable blue score for calibration.
+    blue_scores_full = snapshot.get("blue_scores_full", snapshot.get("blue_scores", {})) or {}
+    for ticket in tickets:
+        blue = int(ticket.get("blue", 0) or 0)
+        ticket["blue_score"] = float(ticket.get("blue_score", blue_scores_full.get(blue, 0.0)))
+        explain_json = ticket.get("explain_json")
+        if isinstance(explain_json, dict):
+            explain_json["blue_score"] = round(float(ticket["blue_score"]), 6)
+
 
     return tickets[:5]
 
@@ -3607,6 +3728,146 @@ def team_cover_backtest_report(
     return finalized
 
 
+
+def _empty_counterfactual_report() -> Dict[str, object]:
+    return {
+        "samples": 0,
+        "offset_counts": {"0": 0, "1": 0, "2": 0},
+        "offset_ticket_avg_score": 0.0,
+        "original_matrix_ticket_avg_score": 0.0,
+        "avg_score_delta": 0.0,
+        "best_of_5_dynamic_avg_score": 0.0,
+        "best_of_5_counterfactual_avg_score": 0.0,
+        "best_of_5_avg_score_delta": 0.0,
+        "improved": 0,
+        "worse": 0,
+        "tied": 0,
+        "red_hit_delta": 0.0,
+        "strategy_counts": {"dynamic_offset_0": 0, "dynamic_offset_1": 0, "dynamic_offset_2": 0},
+    }
+
+
+def _empty_blue_calibration_report() -> Dict[str, object]:
+    return {
+        "rank_buckets": {
+            str(rank): {"exposures": 0, "hits": 0, "hit_rate": 0.0}
+            for rank in range(1, 6)
+        },
+        "samples": 0,
+        "top1_hit_rate": 0.0,
+        "top3_hit_rate": 0.0,
+        "hit_count": 0,
+        "avg_hit_rank": 0.0,
+        "high_rank_better_than_low": False,
+    }
+
+
+def _finalize_counterfactual_report(raw: Dict[str, object]) -> Dict[str, object]:
+    report = _empty_counterfactual_report()
+    report.update({key: value for key, value in raw.items() if key not in {"_offset_score_total", "_original_score_total", "_best_dynamic_total", "_best_counterfactual_total", "_red_hit_delta_total", "_best_delta_total"}})
+    samples = int(raw.get("samples", 0) or 0)
+    if samples <= 0:
+        return report
+    report["offset_ticket_avg_score"] = round(float(raw.get("_offset_score_total", 0.0)) / samples, 6)
+    report["original_matrix_ticket_avg_score"] = round(float(raw.get("_original_score_total", 0.0)) / samples, 6)
+    report["avg_score_delta"] = round(report["offset_ticket_avg_score"] - report["original_matrix_ticket_avg_score"], 6)
+    report["best_of_5_dynamic_avg_score"] = round(float(raw.get("_best_dynamic_total", 0.0)) / samples, 6)
+    report["best_of_5_counterfactual_avg_score"] = round(float(raw.get("_best_counterfactual_total", 0.0)) / samples, 6)
+    report["best_of_5_avg_score_delta"] = round(float(raw.get("_best_delta_total", 0.0)) / samples, 6)
+    report["red_hit_delta"] = round(float(raw.get("_red_hit_delta_total", 0.0)) / samples, 6)
+    return report
+
+
+def _finalize_blue_calibration_report(raw: Dict[str, object]) -> Dict[str, object]:
+    report = _empty_blue_calibration_report()
+    buckets = raw.get("rank_buckets", {}) or {}
+    for rank in range(1, 6):
+        bucket = buckets.get(rank, buckets.get(str(rank), {})) or {}
+        exposures = int(bucket.get("exposures", 0) or 0)
+        hits = int(bucket.get("hits", 0) or 0)
+        report["rank_buckets"][str(rank)] = {"exposures": exposures, "hits": hits, "hit_rate": round(hits / exposures, 6) if exposures else 0.0}
+    samples = int(raw.get("samples", 0) or 0)
+    hit_count = int(raw.get("hit_count", 0) or 0)
+    report["samples"] = samples
+    report["hit_count"] = hit_count
+    report["top1_hit_rate"] = round(int(raw.get("top1_hits", 0) or 0) / samples, 6) if samples else 0.0
+    report["top3_hit_rate"] = round(int(raw.get("top3_hits", 0) or 0) / samples, 6) if samples else 0.0
+    report["avg_hit_rank"] = round(float(raw.get("hit_rank_total", 0.0)) / hit_count, 6) if hit_count else 0.0
+    high = sum(report["rank_buckets"][str(rank)]["hit_rate"] for rank in (1, 2)) / 2.0
+    low = sum(report["rank_buckets"][str(rank)]["hit_rate"] for rank in (4, 5)) / 2.0
+    report["high_rank_better_than_low"] = high > low
+    return report
+
+
+def _stability_objective(overall: Dict[str, object]) -> float:
+    """Fixed comparison score; it is not a probability estimate."""
+    best_score = min(1.0, max(0.0, float(overall.get("best_of_5_avg_score", 0.0)) / 7.5))
+    overlap_penalty = max(0.0, float(overall.get("avg_overlap", 0.0)) - 3.0) * 0.01
+    return round(
+        float(overall.get("best_of_5_hit_rate_ge2", 0.0)) * 0.15
+        + float(overall.get("best_of_5_hit_rate_ge3", 0.0)) * 0.30
+        + float(overall.get("best_of_5_hit_rate_ge4", 0.0)) * 0.30
+        + float(overall.get("final_blue_hit_rate", 0.0)) * 0.10
+        + best_score * 0.15
+        - overlap_penalty,
+        6,
+    )
+
+
+def _stability_stats(values: List[float]) -> Dict[str, object]:
+    if not values:
+        return {"samples": 0, "mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return {"samples": len(values), "mean": round(mean, 6), "std": round(math.sqrt(variance), 6), "min": round(min(values), 6), "max": round(max(values), 6)}
+
+
+def team_stability_backtest_report(
+    records: List[Dict],
+    windows: Iterable[int] = (36, 72, 144, 288),
+    seeds: Iterable[int] = (7, 42, 2026, 20260714),
+    runtime_config: Optional[Dict[str, object]] = None,
+    initial_weights: Optional[Dict[str, float]] = None,
+    progress_callback=None,
+) -> Dict[str, object]:
+    """Run paired dynamic-vs-legacy clean backtests without writing archives."""
+    windows = tuple(dict.fromkeys(max(1, int(window)) for window in windows))
+    seeds = tuple(dict.fromkeys(int(seed) for seed in seeds))
+    clean_runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    runs: List[Dict[str, object]] = []
+    metric_names = ("objective", "best_of_5_avg_score", "best_of_5_hit_rate_ge2", "best_of_5_hit_rate_ge3", "best_of_5_hit_rate_ge4", "final_blue_hit_rate", "avg_overlap")
+    total = len(windows) * len(seeds)
+    current = 0
+    for window in windows:
+        for seed in seeds:
+            current += 1
+            if progress_callback:
+                progress_callback({"current": current, "total": total, "window": window, "seed": seed})
+            dynamic_runtime = _deep_merge_dict(clean_runtime, {"fusion_params": {"anti_ticket_strategy": "dynamic"}})
+            legacy_runtime = _deep_merge_dict(clean_runtime, {"fusion_params": {"anti_ticket_strategy": "legacy"}})
+            dynamic = team_matrix_backtest_report(records, cycles=window, seed=seed, runtime_config=dynamic_runtime, initial_weights=initial_weights)
+            legacy = team_matrix_backtest_report(records, cycles=window, seed=seed, runtime_config=legacy_runtime, initial_weights=initial_weights)
+            dynamic_overall = dynamic.get("overall", {})
+            legacy_overall = legacy.get("overall", {})
+            dynamic_objective = _stability_objective(dynamic_overall)
+            legacy_objective = _stability_objective(legacy_overall)
+            runs.append({"window": window, "seed": seed, "dynamic": dynamic, "legacy": legacy, "dynamic_objective": dynamic_objective, "legacy_objective": legacy_objective, "objective_delta": round(dynamic_objective - legacy_objective, 6)})
+
+    aggregate: Dict[str, object] = {}
+    for mode in ("dynamic", "legacy"):
+        mode_runs = [run for run in runs]
+        values: Dict[str, List[float]] = {name: [] for name in metric_names}
+        for run in mode_runs:
+            overall = run[mode].get("overall", {})
+            values["objective"].append(float(run[f"{mode}_objective"]))
+            for name in metric_names[1:]:
+                values[name].append(float(overall.get(name, 0.0)))
+        aggregate[mode] = {name: _stability_stats(vals) for name, vals in values.items()}
+        aggregate[mode]["robust_score"] = round(aggregate[mode]["objective"]["mean"] - 0.5 * aggregate[mode]["objective"]["std"], 6)
+    deltas = [float(run["objective_delta"]) for run in runs]
+    aggregate["paired"] = {"objective_delta": _stability_stats(deltas), "dynamic_positive_ratio": round(sum(1 for value in deltas if value > 0) / len(deltas), 6) if deltas else 0.0}
+    return {"windows": list(windows), "seeds": list(seeds), "runs": runs, "aggregate": aggregate, "guardrails": {"no_archive_write": True, "fixed_ticket_count": 5, "posthoc_tuning": False, "objective_is_comparison_only": True}}
+
 def team_matrix_backtest_report(
     records: List[Dict],
     cycles: int = 36,
@@ -3634,6 +3895,8 @@ def team_matrix_backtest_report(
                 "avg_overlap": 0.0,
             },
             "matrix_rows": [],
+            "counterfactual": _empty_counterfactual_report(),
+            "blue_calibration": _empty_blue_calibration_report(),
         }
 
     overall = {
@@ -3654,6 +3917,12 @@ def team_matrix_backtest_report(
         "avg_overlap": 0.0,
     }
     matrix_rows: Dict[int, Dict[str, float]] = {}
+    counterfactual_raw = _empty_counterfactual_report()
+    counterfactual_raw.update({"_offset_score_total": 0.0, "_original_score_total": 0.0, "_best_dynamic_total": 0.0, "_best_counterfactual_total": 0.0, "_red_hit_delta_total": 0.0, "_best_delta_total": 0.0})
+    blue_calibration_raw = {
+        "rank_buckets": {rank: {"exposures": 0, "hits": 0} for rank in range(1, 6)},
+        "samples": 0, "top1_hits": 0, "top3_hits": 0, "hit_count": 0, "hit_rank_total": 0.0,
+    }
     ticket_count_total = 0
     lead_learning_cycles = max(8, min(12, cycles))
     lead_window_sizes = (lead_learning_cycles, max(lead_learning_cycles * 2, 24))
@@ -3692,6 +3961,7 @@ def team_matrix_backtest_report(
 
         ticket_scores = []
         red_hit_counts = []
+        ticket_evaluations: List[Tuple[Dict[str, object], float, int]] = []
         blue_hit_any = False
         exact_4plus1_any = False
         ge4_plus_blue_any = False
@@ -3703,6 +3973,7 @@ def team_matrix_backtest_report(
             score = _ticket_score(ticket["red"], ticket["blue"], target)
             ticket_scores.append(score)
             red_hit_counts.append(red_hits)
+            ticket_evaluations.append((ticket, score, red_hits))
             blue_hit_any = blue_hit_any or bool(blue_hit)
             exact_4plus1_any = exact_4plus1_any or (red_hits == 4 and bool(blue_hit))
             ge4_plus_blue_any = ge4_plus_blue_any or (red_hits >= 4 and bool(blue_hit))
@@ -3722,6 +3993,65 @@ def team_matrix_backtest_report(
 
         if not ticket_scores:
             continue
+
+        # Blue calibration ranks the distinct final blue balls by one unified score.
+        distinct_blue: Dict[int, Tuple[Dict[str, object], float, int]] = {}
+        for evaluation in ticket_evaluations:
+            blue = int(evaluation[0].get("blue", 0) or 0)
+            current = distinct_blue.get(blue)
+            if current is None or float(evaluation[0].get("blue_score", 0.0)) > float(current[0].get("blue_score", 0.0)):
+                distinct_blue[blue] = evaluation
+        ranked_blues = sorted(distinct_blue.values(), key=lambda item: (-float(item[0].get("blue_score", 0.0)), int(item[0].get("blue", 0) or 0)))[:5]
+        blue_calibration_raw["samples"] += 1
+        actual_blue = int(target.get("blue_ball", 0) or 0)
+        for rank, (ticket, _, _) in enumerate(ranked_blues, start=1):
+            bucket = blue_calibration_raw["rank_buckets"][rank]
+            bucket["exposures"] += 1
+            if int(ticket.get("blue", 0) or 0) == actual_blue:
+                bucket["hits"] += 1
+                blue_calibration_raw["hit_count"] += 1
+                blue_calibration_raw["hit_rank_total"] += rank
+                if rank == 1:
+                    blue_calibration_raw["top1_hits"] += 1
+                if rank <= 3:
+                    blue_calibration_raw["top3_hits"] += 1
+
+        # Compare the dynamic fifth ticket with the untouched weakest matrix row.
+        for eval_index, (ticket, selected_score, selected_red_hits) in enumerate(ticket_evaluations):
+            explain_json = ticket.get("explain_json") or {}
+            strategy = str(explain_json.get("strategy", "")) if isinstance(explain_json, dict) else ""
+            original = ticket.get("counterfactual_ticket")
+            if not strategy.startswith("dynamic_offset_") or not isinstance(original, dict):
+                continue
+            try:
+                offset_count = int(strategy.rsplit("_", 1)[-1])
+            except ValueError:
+                offset_count = 0
+            offset_count = max(0, min(2, offset_count))
+            original_score = _ticket_score(original.get("red", []), int(original.get("blue", 0) or 0), target)
+            original_red_hits = len(set(original.get("red", [])) & set(target.get("red_balls", [])))
+            counterfactual_scores = list(ticket_scores)
+            counterfactual_scores[eval_index] = original_score
+            best_dynamic = max(ticket_scores)
+            best_counterfactual = max(counterfactual_scores)
+            delta = selected_score - original_score
+            counterfactual_raw["samples"] += 1
+            counterfactual_raw["offset_counts"][str(offset_count)] += 1
+            counterfactual_raw["strategy_counts"][f"dynamic_offset_{offset_count}"] += 1
+            counterfactual_raw["_offset_score_total"] += selected_score
+            counterfactual_raw["_original_score_total"] += original_score
+            counterfactual_raw["_best_dynamic_total"] += best_dynamic
+            counterfactual_raw["_best_counterfactual_total"] += best_counterfactual
+            counterfactual_raw["_best_delta_total"] += best_dynamic - best_counterfactual
+            counterfactual_raw["_red_hit_delta_total"] += selected_red_hits - original_red_hits
+            if delta > 1e-12:
+                counterfactual_raw["improved"] += 1
+            elif delta < -1e-12:
+                counterfactual_raw["worse"] += 1
+            else:
+                counterfactual_raw["tied"] += 1
+            break
+
         max_hits = max(red_hit_counts) if red_hit_counts else 0
         overall["avg_ticket_score"] += sum(ticket_scores)
         overall["best_of_5_avg_score"] += max(ticket_scores)
@@ -3761,7 +4091,12 @@ def team_matrix_backtest_report(
             }
         )
     matrix_row_report.sort(key=lambda row: (-row["avg_score"], row["row_id"]))
-    return {"overall": overall, "matrix_rows": matrix_row_report}
+    return {
+        "overall": overall,
+        "matrix_rows": matrix_row_report,
+        "counterfactual": _finalize_counterfactual_report(counterfactual_raw),
+        "blue_calibration": _finalize_blue_calibration_report(blue_calibration_raw),
+    }
 
 
 def judge_with_lead_agent(
@@ -4025,6 +4360,12 @@ def main():
                        help='运行 team 端到端矩阵回测（只读历史数据，不写归档）')
     parser.add_argument('--team-cover-backtest', action='store_true',
                        help='运行 team-cover 实验模式回测（只读历史数据，不写归档）')
+    parser.add_argument('--team-stability-backtest', action='store_true',
+                       help='运行 dynamic-vs-legacy 多窗口多种子稳定性回测（只读，不写归档）')
+    parser.add_argument('--stability-windows', default='36,72,144,288',
+                       help='稳定性回测窗口，逗号分隔（默认36,72,144,288）')
+    parser.add_argument('--stability-seeds', default='7,42,2026,20260714',
+                       help='稳定性回测随机种子，逗号分隔')
     parser.add_argument('--backtest-cycles', type=int, default=36,
                        help='team 端到端矩阵回测期数（默认36期）')
     parser.add_argument('--backtest-use-current-patches', action='store_true',
@@ -4056,7 +4397,7 @@ def main():
     stale, stale_detail = is_data_stale(records[0]['date'])
     if stale:
         # 回测模式只读历史数据，允许在数据过期时继续运行
-        if not args.team_backtest and not args.team_cover_backtest:
+        if not args.team_backtest and not args.team_cover_backtest and not args.team_stability_backtest:
             print("\n⚠️ 本地开奖数据已落后于最近应开奖期，已停止本次预测。")
             print(f"📌 本地最新开奖日: {stale_detail['latest_record_date']}")
             print(f"📌 应有最新开奖日: {stale_detail['expected_latest_draw_date']}")
@@ -4075,6 +4416,55 @@ def main():
     print("\n" + "=" * 60)
     print("🎯 预测号码")
     print("=" * 60)
+
+    if args.team_stability_backtest:
+        runtime_config, initial_weights, patch_source = resolve_backtest_priors(
+            args.backtest_use_current_patches, args.weight_patch
+        )
+        try:
+            windows = [int(value.strip()) for value in str(args.stability_windows).split(",") if value.strip()]
+            seeds = [int(value.strip()) for value in str(args.stability_seeds).split(",") if value.strip()]
+        except ValueError:
+            parser.error("--stability-windows 和 --stability-seeds 必须是逗号分隔的整数")
+        if not windows or not seeds:
+            parser.error("稳定性回测至少需要一个窗口和一个 seed")
+        print(f"\n🧪 稳定性回测先验: {patch_source}（默认 clean）")
+
+        def _print_stability_progress(update: Dict[str, object]) -> None:
+            print(
+                f"\r⏳ stability 回测: {int(update.get('current', 0))}/{int(update.get('total', 0))} "
+                f"| window={update.get('window')} | seed={update.get('seed')}",
+                end="", flush=True,
+            )
+
+        report = team_stability_backtest_report(
+            records, windows=windows, seeds=seeds, runtime_config=runtime_config,
+            initial_weights=initial_weights, progress_callback=_print_stability_progress,
+        )
+        print("\n\n📊 dynamic vs legacy 配对结果:")
+        for run in report["runs"]:
+            print(
+                f"  - window={run['window']} seed={run['seed']} | "
+                f"dynamic={run['dynamic_objective']:.4f} legacy={run['legacy_objective']:.4f} "
+                f"delta={run['objective_delta']:+.4f}"
+            )
+        aggregate = report["aggregate"]
+        print(
+            f"  - dynamic 稳健分 {aggregate['dynamic']['robust_score']:.4f} | "
+            f"legacy 稳健分 {aggregate['legacy']['robust_score']:.4f} | "
+            f"dynamic 正向 run 比例 {aggregate['paired']['dynamic_positive_ratio']:.2%}"
+        )
+        print(
+            f"  - 配对目标差均值 {aggregate['paired']['objective_delta']['mean']:+.4f} | "
+            f"标准差 {aggregate['paired']['objective_delta']['std']:.4f} | "
+            f"最差 {aggregate['paired']['objective_delta']['min']:+.4f} | "
+            f"最好 {aggregate['paired']['objective_delta']['max']:+.4f}"
+        )
+        print("  - 说明: 综合目标仅用于固定规则的离线比较；不代表中奖概率，也不进行事后调参。")
+        print("\n" + "=" * 60)
+        print("⚠️ 仅供娱乐，不构成投注建议！")
+        print("=" * 60)
+        return
 
     if args.team_cover_backtest:
         runtime_config, initial_weights, patch_source = resolve_backtest_priors(
@@ -4204,6 +4594,20 @@ def main():
         print(
             f"  - 最终5注蓝球命中率 {overall['final_blue_hit_rate']:.2%} | "
             f"组合平均重叠度 {overall.get('avg_overlap', 0):.3f}"
+        )
+        counterfactual = team_backtest.get("counterfactual", {})
+        print(
+            f"  - 动态偏移次数 0/1/2={counterfactual.get('offset_counts', {}).get('0', 0)}/"
+            f"{counterfactual.get('offset_counts', {}).get('1', 0)}/"
+            f"{counterfactual.get('offset_counts', {}).get('2', 0)} | "
+            f"偏移票分数增量 {float(counterfactual.get('avg_score_delta', 0.0)):+.3f} | "
+            f"best-of-5 增量 {float(counterfactual.get('best_of_5_avg_score_delta', 0.0)):+.3f}"
+        )
+        calibration = team_backtest.get("blue_calibration", {})
+        print(
+            f"  - 蓝球排名校准 top1={float(calibration.get('top1_hit_rate', 0.0)):.2%} | "
+            f"top3={float(calibration.get('top3_hit_rate', 0.0)):.2%} | "
+            f"命中时平均排名={float(calibration.get('avg_hit_rank', 0.0)):.2f}"
         )
         if team_backtest["matrix_rows"]:
             print("  - 矩阵行表现:")

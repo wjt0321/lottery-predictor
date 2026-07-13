@@ -36,7 +36,7 @@ class ProjectConfig:
     min_ticket_decay: float = 0.55
     debate_factor: float = 0.6
     anti_ticket_red_count: int = 2
-    anti_ticket_strategy: str = "scientific"
+    anti_ticket_strategy: str = "dynamic"
     anti_ticket_candidate_limit: int = 6
     anti_ticket_standout_threshold: float = 0.65
     anti_ticket_min_standout_agents: int = 1
@@ -47,6 +47,12 @@ class ProjectConfig:
     anti_ticket_coverage_weight: float = 0.30
     anti_ticket_structure_weight: float = 0.20
     anti_ticket_uncertainty_weight: float = 0.15
+    # dynamic strategy thresholds: higher evidence is required for two offsets
+    anti_ticket_dynamic_one_score_threshold: float = 0.42
+    anti_ticket_dynamic_two_score_threshold: float = 0.58
+    anti_ticket_dynamic_min_score_gap: float = 0.04
+    anti_ticket_dynamic_one_min_coverage: int = 1
+    anti_ticket_dynamic_two_min_coverage: int = 2
     learning_rate: float = 0.25
     decay_gamma: float = 0.85
     default_learn_cycles: int = 30
@@ -103,6 +109,11 @@ class ProjectConfig:
                 "anti_ticket_max_overlap": self.anti_ticket_max_overlap,
                 "anti_ticket_sum_quantile_low": self.anti_ticket_sum_quantile_low,
                 "anti_ticket_sum_quantile_high": self.anti_ticket_sum_quantile_high,
+                "anti_ticket_dynamic_one_score_threshold": self.anti_ticket_dynamic_one_score_threshold,
+                "anti_ticket_dynamic_two_score_threshold": self.anti_ticket_dynamic_two_score_threshold,
+                "anti_ticket_dynamic_min_score_gap": self.anti_ticket_dynamic_min_score_gap,
+                "anti_ticket_dynamic_one_min_coverage": self.anti_ticket_dynamic_one_min_coverage,
+                "anti_ticket_dynamic_two_min_coverage": self.anti_ticket_dynamic_two_min_coverage,
                 "anti_ticket_score_weights": {
                     "counter_evidence": self.anti_ticket_counter_evidence_weight,
                     "coverage": self.anti_ticket_coverage_weight,

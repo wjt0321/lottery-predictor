@@ -367,6 +367,24 @@ class PredictFlowTests(unittest.TestCase):
         other_blues = {ticket["blue"] for ticket in tickets if ticket is not offset}
         self.assertNotIn(offset["blue"], other_blues)
 
+    def test_generate_team_matrix_tickets_dynamic_keeps_matrix_row_without_evidence(self):
+        teams = {
+            "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}], "error": ""},
+            "cold": {"proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 2}], "error": ""},
+        }
+        lead_model = {"weights": {"hot": 0.5, "cold": 0.5}, "diff_scores": {"hot": 0.0, "cold": 0.0}}
+        with mock.patch.object(predict, "_build_offset_candidate_profiles", return_value=[]):
+            tickets = predict.generate_team_matrix_tickets(
+                teams, lead_model, diff_factor=1.0, records=self._build_mock_records(40),
+                runtime_config={"fusion_params": {"anti_ticket_strategy": "dynamic"}}, seed=42,
+            )
+        dynamic = tickets[-1]
+        self.assertEqual(dynamic["explain_json"]["strategy"], "dynamic_offset_0")
+        self.assertEqual(dynamic["red"], dynamic["counterfactual_ticket"]["red"])
+        self.assertEqual(dynamic["blue"], dynamic["counterfactual_ticket"]["blue"])
+        self.assertNotIn("anti_consensus", dynamic.get("sources", []))
+
+
     def test_generate_team_matrix_tickets_can_use_legacy_offset_strategy(self):
         teams = {
             "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}], "error": ""},
@@ -673,7 +691,12 @@ class PredictFlowTests(unittest.TestCase):
 
     def test_project_config_exposes_scientific_offset_defaults(self):
         fusion = predict.CONFIG.to_runtime_config()["fusion_params"]
-        self.assertEqual(fusion["anti_ticket_strategy"], "scientific")
+        self.assertEqual(fusion["anti_ticket_strategy"], "dynamic")
+        self.assertEqual(fusion["anti_ticket_dynamic_one_score_threshold"], 0.42)
+        self.assertEqual(fusion["anti_ticket_dynamic_two_score_threshold"], 0.58)
+        self.assertEqual(fusion["anti_ticket_dynamic_min_score_gap"], 0.04)
+        self.assertEqual(fusion["anti_ticket_dynamic_one_min_coverage"], 1)
+        self.assertEqual(fusion["anti_ticket_dynamic_two_min_coverage"], 2)
         self.assertEqual(fusion["anti_ticket_candidate_limit"], 6)
         self.assertEqual(fusion["anti_ticket_standout_threshold"], 0.65)
         self.assertEqual(fusion["anti_ticket_min_standout_agents"], 1)
@@ -1384,6 +1407,66 @@ class PredictFlowTests(unittest.TestCase):
             mode="team_cover",
         )
         self.assertIn("mode=team_cover", summary)
+
+    def test_team_matrix_backtest_reports_counterfactual_and_blue_calibration(self):
+        history = self._build_mock_records(35)
+        target = {"period": "2026999", "red_balls": [1, 2, 3, 4, 5, 6], "blue_ball": 5}
+        tickets = [
+            {"red": [7, 8, 9, 10, 11, 12], "blue": 1, "blue_score": 4.0, "matrix_row_id": 1, "explain_json": {}},
+            {"red": [13, 14, 15, 16, 17, 18], "blue": 2, "blue_score": 3.0, "matrix_row_id": 2, "explain_json": {}},
+            {"red": [19, 20, 21, 22, 23, 24], "blue": 3, "blue_score": 2.0, "matrix_row_id": 3, "explain_json": {}},
+            {"red": [25, 26, 27, 28, 29, 30], "blue": 4, "blue_score": 1.0, "matrix_row_id": 4, "explain_json": {}},
+            {
+                "red": [1, 2, 3, 4, 20, 21], "blue": 5, "blue_score": 9.0, "matrix_row_id": 5,
+                "counterfactual_ticket": {"red": [1, 2, 20, 21, 22, 23], "blue": 4, "blue_score": 1.0, "matrix_row_id": 5},
+                "explain_json": {"strategy": "dynamic_offset_2", "core_pool": {"blue_pool": [1, 2, 3, 4, 5]}},
+            },
+        ]
+        with mock.patch.object(predict, "iterate_archived_cycles", return_value=[(list(reversed(history)), target)]), \
+             mock.patch.object(predict, "train_lead_agent", return_value={"weights": {}, "diff_scores": {}}), \
+             mock.patch.object(predict, "build_expert_teams", return_value={}), \
+             mock.patch.object(predict, "generate_final_team_tickets", return_value=tickets):
+            report = predict.team_matrix_backtest_report(history, cycles=1, seed=42)
+        self.assertEqual(report["counterfactual"]["offset_counts"]["2"], 1)
+        self.assertGreater(report["counterfactual"]["avg_score_delta"], 0.0)
+        self.assertEqual(report["blue_calibration"]["top1_hit_rate"], 1.0)
+        self.assertEqual(report["blue_calibration"]["rank_buckets"]["1"]["hits"], 1)
+
+    def test_team_matrix_backtest_empty_report_has_diagnostics(self):
+        report = predict.team_matrix_backtest_report([], cycles=1, seed=42)
+        self.assertEqual(report["counterfactual"]["samples"], 0)
+        self.assertEqual(report["blue_calibration"]["samples"], 0)
+
+    def test_team_stability_backtest_aggregates_paired_runs(self):
+        def fake_report(records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None):
+            strategy = runtime_config["fusion_params"]["anti_ticket_strategy"]
+            uplift = 0.05 if strategy == "dynamic" else 0.0
+            overall = {
+                "best_of_5_avg_score": 2.0 + uplift,
+                "best_of_5_hit_rate_ge2": 0.5 + uplift,
+                "best_of_5_hit_rate_ge3": 0.2 + uplift,
+                "best_of_5_hit_rate_ge4": 0.05 + uplift,
+                "final_blue_hit_rate": 0.25 + uplift,
+                "avg_overlap": 2.5,
+            }
+            return {"overall": overall, "matrix_rows": [], "counterfactual": {}, "blue_calibration": {}}
+
+        updates = []
+        with mock.patch.object(predict, "team_matrix_backtest_report", side_effect=fake_report):
+            report = predict.team_stability_backtest_report(
+                [], windows=[36, 72], seeds=[7, 42], progress_callback=updates.append
+            )
+        self.assertEqual(len(report["runs"]), 4)
+        self.assertEqual(len(updates), 4)
+        self.assertEqual(report["aggregate"]["paired"]["dynamic_positive_ratio"], 1.0)
+        self.assertGreater(report["aggregate"]["dynamic"]["robust_score"], report["aggregate"]["legacy"]["robust_score"])
+
+    def test_predict_help_includes_team_stability_backtest(self):
+        project_root = os.path.abspath(os.path.dirname(__file__) or ".")
+        result = subprocess.run([sys.executable, "predict.py", "--help"], cwd=project_root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        self.assertIn("--team-stability-backtest", result.stdout)
+        self.assertIn("--stability-windows", result.stdout)
+        self.assertIn("--stability-seeds", result.stdout)
 
 
 if __name__ == "__main__":

@@ -460,6 +460,42 @@ class AlgorithmCorrectnessTests(unittest.TestCase):
         self.assertEqual(result["best_of_5_hit_count_ge4_plus_blue"], 2)
         self.assertEqual(result["best_of_5_hit_rate_ge4_plus_blue"], 1.0)
 
+    def test_scientific_offset_selector_supports_one_offset_and_diagnostics(self):
+        result = predict._select_scientific_offset_reds(
+            base_reds=[1, 2, 3, 4, 5, 6],
+            profiles=[
+                {"ball": 23, "counter_evidence": 0.90, "disagreement": 0.40, "standout_agents": ["hot", "cycle"]},
+                {"ball": 24, "counter_evidence": 0.70, "disagreement": 0.20, "standout_agents": ["cold"]},
+            ],
+            red_scores={ball: float(7 - ball) for ball in range(1, 7)},
+            existing_tickets=[],
+            records=[{"red_balls": [1, 5, 10, 18, 25, 33], "blue_ball": 1} for _ in range(10)],
+            seed=42,
+            offset_count=1,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["kept_core"], [1, 2, 3, 4, 5])
+        self.assertEqual(len(result["offset_reds"]), 1)
+        self.assertIn("runner_up_score", result)
+        self.assertIn("score_gap", result)
+        self.assertGreaterEqual(result["evidence_agent_count"], 1)
+
+    def test_dynamic_offset_policy_selects_two_then_one_then_zero(self):
+        one = {"score": 0.50, "best_score": 0.50, "runner_up_score": 0.44, "score_gap": 0.06, "evidence_agent_count": 1, "constraints": {"sum_relaxed": False}}
+        two = {"score": 0.70, "best_score": 0.70, "runner_up_score": 0.62, "score_gap": 0.08, "evidence_agent_count": 2, "constraints": {"sum_relaxed": False}}
+        runtime = {"fusion_params": {
+            "anti_ticket_dynamic_one_score_threshold": 0.42,
+            "anti_ticket_dynamic_two_score_threshold": 0.58,
+            "anti_ticket_dynamic_min_score_gap": 0.04,
+            "anti_ticket_dynamic_one_min_coverage": 1,
+            "anti_ticket_dynamic_two_min_coverage": 2,
+        }}
+        self.assertEqual(predict._choose_dynamic_offset_plan({1: one, 2: two}, runtime)["offset_count"], 2)
+        weak_two = dict(two, score=0.55, best_score=0.55)
+        self.assertEqual(predict._choose_dynamic_offset_plan({1: one, 2: weak_two}, runtime)["offset_count"], 1)
+        weak_one = dict(one, score=0.30, best_score=0.30)
+        self.assertEqual(predict._choose_dynamic_offset_plan({1: weak_one, 2: weak_two}, runtime)["offset_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

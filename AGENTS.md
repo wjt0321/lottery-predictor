@@ -25,8 +25,8 @@ lottery_data.json ──→ predict.py (team mode pipeline)
                         ├── 5. _build_debate_pool(): anti-consensus debate (experts re-evaluate excluded 11 balls → re-rank)
                         ├── 6. BlueBallEngine.predict(): multi-dim blue scoring
                         ├── 7. _build_blue_debate(): blue anti-consensus debate (promote low-score blues with standout dimensions)
-                        ├── 8. generate_team_matrix_tickets(): matrix + ticket-5 scientific offset
-                        │       └── weakest row becomes ticket 5: 4 core + 2 scientific offsets
+                        ├── 8. generate_team_matrix_tickets(): matrix + ticket-5 dynamic 0/1/2 offset
+                        │       └── weakest row becomes ticket 5: preserve row or apply 1/2 evidence-backed offsets
                         └── 9. archive → prediction_archive/YYYYXXX.txt
 
 prediction_archive/ ──→ analyze_archive.py
@@ -64,22 +64,24 @@ run_team_mode()
   ├── _build_debate_pool()         # anti-consensus debate: experts re-evaluate excluded 11 balls
   ├── BlueBallEngine(records, blue_params).predict()  # blue ball scoring
   ├── _build_blue_debate()         # blue debate: promote low-score blues with standout dimensions
-  ├── generate_team_matrix_tickets()      # matrix + ticket-5 scientific offset
+  ├── generate_team_matrix_tickets()      # matrix + ticket-5 dynamic 0/1/2 offset
   │     ├── _build_offset_candidate_profiles() # independent counter-evidence over all 33 reds
-  │     ├── _select_scientific_offset_reds()   # constrained pair search for ticket 5
+  │     ├── _select_scientific_offset_reds()   # constrained 1/2-ball search for ticket 5
+  │     ├── _choose_dynamic_offset_plan()      # threshold policy chooses 0/1/2
   │     └── _select_blue_ball_for_row()        # blue dedup selection
   └── _archive_prediction()        # write archive
 ```
 
-Backtest entry points: `_run_team_backtest()` / `_run_team_cover_backtest()`
+Backtest entry points: `team_matrix_backtest_report()` / `team_cover_backtest_report()` / `team_stability_backtest_report()`
 
 ## Configuration System
 
 `project_config.py::ProjectConfig` — single source of truth:
 
 - **Pool**: `core_red_pool_size=22`, `core_blue_pool_size=10`, `rotation_matrix_type="22_red_cover_6_to_5"`
-- **Ticketing**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`; ticket 5 defaults to `anti_ticket_strategy="scientific"` and keeps 4 core + 2 evidence-backed offsets
+- **Ticketing**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`; ticket 5 defaults to `anti_ticket_strategy="dynamic"`; it preserves the original row or keeps 5/4 core plus 1/2 evidence-backed offsets
 - **Debate**: `debate_factor=0.6`, controls anti-consensus debate influence strength
+- **Dynamic offset**: `anti_ticket_dynamic_one_score_threshold=0.42`, `anti_ticket_dynamic_two_score_threshold=0.58`, `anti_ticket_dynamic_min_score_gap=0.04`, coverage gates `1/2`
 - **Learning**: `learning_rate=0.25`, `decay_gamma=0.85`, `default_learn_cycles=30`
 - **Blue ball**: all `blue_*` params flow via `to_runtime_config()["blue_params"]` → `BlueBallEngine`
 - **Position weights**: `pos_weight_min=0.6`, `pos_weight_max=1.5` (applied at core pool scoring)
@@ -119,14 +121,15 @@ Missing patch files do not block prediction — system falls back gracefully.
 
 ## Current Behavior
 
-- `team` mode always outputs `5` tickets of `6+1`; ticket 5 is the scientific offset ticket by default
-- Flow is expert proposals -> `build_core_pool_snapshot()` -> full-33 debate scores -> matrix tickets -> constrained scientific offset replacement
+- `team` mode always outputs `5` tickets of `6+1`; ticket 5 uses `dynamic_offset_0/1/2` by default
+- Flow is expert proposals -> `build_core_pool_snapshot()` -> full-33 debate scores -> matrix tickets -> dynamic constrained offset decision
 - `team-cover` mode also outputs `5` tickets, writes compact archive output, and marks `lead_summary.mode=team_cover`
 - Position weights now affect core-pool scoring, not just row-local ordering
 - `blue_params` flows into `BlueBallEngine` and can be overridden by `param patch`
 - `row_weights` affects default matrix row order; current semantics are dynamic ordering, not dynamic elimination
-- `--team-backtest` prints progress and reports final 5-ticket metrics, including average ticket overlap
+- `--team-backtest` prints progress and reports final 5-ticket metrics, counterfactual offset attribution, blue-rank calibration, and average ticket overlap
 - `--team-cover-backtest` prints three-way comparison metrics for `team_cover`, `team`, and `conditional_random`, and does not write archives
+- `--team-stability-backtest` pairs dynamic and legacy across windows/seeds, reports objective volatility and robust score, and does not write archives
 - Backtests default to clean runtime config and no archive-derived weight prior; `--backtest-use-current-patches` is an explicit offline sensitivity experiment
 
 ## Hard Constraints
@@ -149,6 +152,7 @@ python predict.py --mode team-cover --num 5 --seed 42
 # Backtests
 python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
+python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42
 # Offline sensitivity experiment only:
 python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 
@@ -172,4 +176,5 @@ python -m unittest test_predict.PredictFlowTests.test_agent_teams_excludes_lstm 
 - Config changes: `project_config.py` AND `blue_ball_engine.py` AND `to_runtime_config()` output AND `param_patch` injection
 - `BlueBallEngine` param changes: `project_config.py` `blue_*` fields AND `to_runtime_config()["blue_params"]`
 - Backtest metric changes: `README.md` command examples and wording
+- Stability changes: keep dynamic/legacy paired runs, counterfactual fields, blue calibration, CLI docs, and tests aligned
 - team-cover behavior changes: keep `README.md`, `SKILL.md`, `AGENTS.md`, and `test_predict.py` aligned

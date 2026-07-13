@@ -35,7 +35,7 @@
 - ♻️ **自学习闭环方向**：基于归档回测持续调权调参
 - 🤖 **8-Agent团队模式**：先聚合核心号码池，再用旋转矩阵固定出票 5 注
 - 🎯 **V5 命中率优化**：蓝球去重与配置回灌、端到端 team 回测、矩阵行动态排序、位置权重前移
-- 🧭 **科学偏移票**：5 注中的第 5 注固定采用“4 个模型核心 + 2 个证据型偏移球”，再用结构约束搜索控制组合风险
+- 🧭 **V6 动态科学偏移**：第 5 注按事前证据动态选择 0/1/2 个偏移球，并保留原矩阵票用于反事实归因
 
 ## 功能特点
 
@@ -113,6 +113,9 @@ python predict.py --team-backtest --backtest-cycles 36 --seed 42
 
 # 运行 team-cover 对照回测（只读历史数据，不写归档）
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
+
+# 运行 dynamic-vs-legacy 多窗口、多种子稳定性回测
+python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42
 ```
 
 **参数说明**：
@@ -126,6 +129,8 @@ python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
 - `--weight-patch`: 显式指定权重补丁路径（未指定时自动尝试 `config/weight_patch.latest.json`）
 - `--team-backtest`: 运行最终 team 矩阵出票链路回测（不写归档，输出单专家口径与最终 5 注口径）
 - `--team-cover-backtest`: 运行 team-cover 实验模式对照回测（不写归档，输出 `team_cover` / `team` / `conditional_random` 三组口径）
+- `--team-stability-backtest`: 配对运行 `dynamic` 与 `legacy` 的多窗口、多种子稳定性回测，不写归档
+- `--stability-windows` / `--stability-seeds`: 逗号分隔的稳定性实验矩阵
 - `--backtest-cycles`: team 端到端回测期数（默认36期）
 - `--backtest-use-current-patches`: 离线实验时显式加载当前补丁；默认关闭，避免未来归档信息泄漏到历史样本
 
@@ -228,7 +233,7 @@ python predict.py --advanced --num 5
 1. 每个专家基于不同策略生成候选注
 2. 主 Agent 通过历史回测学习专家权重
 3. 系统聚合核心红球池和蓝球池
-4. 使用固定旋转矩阵生成候选票，并把最低信念行改造成第 5 注科学偏移票
+4. 使用固定旋转矩阵生成候选票，并把最低信念行作为第 5 注动态偏移角色票（0/1/2 个偏移）
 5. 自动归档预测结果与偏移证据，用于后续评估
 
 #### 2. 旋转矩阵出票
@@ -236,11 +241,11 @@ python predict.py --advanced --num 5
 - `team` 模式不再把专家提案直接随机打散成多注
 - 系统先汇总核心红球池（默认 22 球）与蓝球候选池（默认 10 球）
 - 使用 `22_red_cover_6_to_5` 固定旋转矩阵把核心池压缩为 `5` 注 `6+1`
-- 其中最低信念矩阵行会改造成固定排在第 5 位的“4 个模型核心 + 2 个科学偏移球”混合票
+- 最低信念矩阵行固定承担第 5 注角色：证据不足时保留原票；证据达到门槛时替换 1 或 2 个低置信核心球
 - 偏移候选只统计 `hot/cold/missing/cycle/sum/zone` 六个有独立证据维度的专家；`balanced/random` 不参与独立证据计数
-- 系统先在 1-33 全量红球上生成反证画像，再枚举偏移球组合，并约束三区覆盖、奇偶比、历史和值分位和与其他 4 注的最大重叠
-- 组合评分默认由反证强度、覆盖增益、结构合理性和模型分歧共同构成；证据不足或无可行组合时自动回退旧反共识混合逻辑
-- `anti_ticket_strategy=scientific` 为默认值；离线对照可通过参数补丁改为 `legacy`，探索球数量仍由 `anti_ticket_red_count` 控制
+- 系统先在 1-33 全量红球上生成反证画像，再分别枚举 1 球与 2 球偏移组合，并约束三区覆盖、奇偶比、历史和值分位和与其他 4 注的最大重叠
+- 组合评分默认由反证强度、覆盖增益、结构合理性和模型分歧共同构成；`dynamic` 证据不足时保留原矩阵票，不随机偏移
+- `anti_ticket_strategy=dynamic` 为默认值；`scientific` 保留固定偏移兼容语义且无解时回退 `legacy`，`legacy` 继续作为随机反共识基准
 - 位置权重会前移到核心池评分阶段，真正影响候选集合
 - 这样可以尽量保留号码池价值，避免在拆票阶段把高价值号码关系随机稀释
 - **动态排序**：分析器会根据矩阵行历史表现调整优先顺序，但仍保持固定输出 5 注
@@ -316,6 +321,25 @@ python predict.py --team-cover-backtest --backtest-use-current-patches --backtes
 - 默认使用 clean 配置和空权重先验，避免当前补丁包含的未来归档信息泄漏；仅离线对照实验可追加 `--backtest-use-current-patches`
 - 验收口径优先看相对条件随机基准的 uplift，而不是绝对预测承诺
 
+### 稳定性与反事实回测（--team-stability-backtest）
+
+稳定性回测在相同窗口、相同 seed 下配对运行 `dynamic` 与 `legacy`，默认使用 clean runtime。报告包含每个 run 的完整 team 指标、固定综合目标、配对差值、均值/标准差/极值、正向 run 比例和 `mean - 0.5 × std` 稳健分。
+
+```bash
+python predict.py --team-stability-backtest \
+  --stability-windows 36,72,144,288 \
+  --stability-seeds 7,42,2026,20260714
+```
+
+普通 `--team-backtest` 还会输出：
+
+- 第 5 注动态偏移 0/1/2 的启用次数；
+- 偏移票与原矩阵票的平均分差、best-of-5 反事实增量及改善/变差/持平次数；
+- 最终蓝球按统一 `blue_score` 排名后的 top-1 / top-3 命中率和命中平均排名。
+
+这些指标只用于离线稳定性和排序校准诊断，不代表中奖概率，也不用于事后搜索参数。
+
+
 ## 数据文件
 
 ### lottery_data.json
@@ -390,6 +414,7 @@ python predict.py --team-cover-backtest --backtest-use-current-patches --backtes
 | 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
 | 分析 | team 端到端矩阵回测（带进度） | `python predict.py --team-backtest --backtest-cycles 36 --seed 42` |
 | 分析 | team-cover 对照回测（不写归档） | `python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42` |
+| 分析 | dynamic-vs-legacy 稳定性回测 | `python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42` |
 | 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
 | 分析 | 导出报告并写回三类补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
 | 补丁回灌 | 显式加载权重补丁参与团队预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
