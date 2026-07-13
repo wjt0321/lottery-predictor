@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
 
 import predict
@@ -901,6 +902,7 @@ class PredictFlowTests(unittest.TestCase):
                  "build_archive_lead_summary",
                  return_value="factor=1.00;mode=team_cover;patch_source=none;agents=hot;report=覆盖实验",
              ) as mocked_summary, \
+             mock.patch.object(predict, "build_archive_metadata", return_value={"archive_schema_version": "2"}) as mocked_metadata, \
              mock.patch.object(predict, "save_compact_prediction", return_value="prediction_archive/2099001.txt") as mocked_archive, \
              mock.patch("sys.stdout", new_callable=io.StringIO) as fake_stdout:
             predict.main()
@@ -912,10 +914,12 @@ class PredictFlowTests(unittest.TestCase):
             seed=42,
         )
         mocked_summary.assert_called_once()
+        mocked_metadata.assert_called_once()
         mocked_archive.assert_called_once_with(
             "2099001",
             cover_tickets,
             "factor=1.00;mode=team_cover;patch_source=none;agents=hot;report=覆盖实验",
+            metadata={"archive_schema_version": "2"},
         )
         output = fake_stdout.getvalue()
         self.assertIn("第1注", output)
@@ -1467,6 +1471,186 @@ class PredictFlowTests(unittest.TestCase):
         self.assertIn("--team-stability-backtest", result.stdout)
         self.assertIn("--stability-windows", result.stdout)
         self.assertIn("--stability-seeds", result.stdout)
+
+
+    def test_stability_stats_include_quantiles_and_deterministic_ci(self):
+        first = predict._stability_stats([1.0, 2.0, 3.0, 4.0], bootstrap_iterations=400)
+        second = predict._stability_stats([1.0, 2.0, 3.0, 4.0], bootstrap_iterations=400)
+        self.assertEqual(first, second)
+        self.assertEqual(first["median"], 2.5)
+        self.assertEqual(first["q25"], 1.75)
+        self.assertEqual(first["q75"], 3.25)
+        self.assertLessEqual(first["ci95_low"], first["mean"])
+        self.assertGreaterEqual(first["ci95_high"], first["mean"])
+
+    def test_stability_stats_empty_contract_is_complete(self):
+        stats = predict._stability_stats([])
+        for key in ("samples", "mean", "std", "min", "max", "median", "q25", "q75", "ci95_low", "ci95_high"):
+            self.assertIn(key, stats)
+            self.assertEqual(stats[key], 0 if key == "samples" else 0.0)
+
+    def test_team_stability_backtest_groups_runs_and_counts_pair_outcomes(self):
+        def fake_report(records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None):
+            strategy = runtime_config["fusion_params"]["anti_ticket_strategy"]
+            sign = 1.0 if seed == 7 else -1.0
+            uplift = 0.04 * sign if strategy == "dynamic" else 0.0
+            return {"overall": {
+                "best_of_5_avg_score": 2.0 + uplift,
+                "best_of_5_hit_rate_ge2": 0.5 + uplift,
+                "best_of_5_hit_rate_ge3": 0.2 + uplift,
+                "best_of_5_hit_rate_ge4": 0.05 + uplift,
+                "final_blue_hit_rate": 0.25 + uplift,
+                "avg_overlap": 2.5,
+            }}
+
+        with mock.patch.object(predict, "team_matrix_backtest_report", side_effect=fake_report):
+            report = predict.team_stability_backtest_report([], windows=[36, 72], seeds=[7, 42])
+        self.assertEqual(report["report_schema_version"], "stability-report/v2")
+        self.assertEqual(set(report["aggregate"]["by_window"]), {"36", "72"})
+        self.assertEqual(set(report["aggregate"]["by_seed"]), {"7", "42"})
+        self.assertEqual(report["aggregate"]["paired"]["positive_count"], 2)
+        self.assertEqual(report["aggregate"]["paired"]["negative_count"], 2)
+        self.assertEqual(report["aggregate"]["paired"]["tie_count"], 0)
+
+    def test_export_backtest_report_writes_json_and_csv(self):
+        report = {
+            "report_schema_version": "stability-report/v2",
+            "runs": [{"window": 36, "seed": 7, "dynamic_objective": 0.3, "legacy_objective": 0.2, "objective_delta": 0.1}],
+            "aggregate": {
+                "dynamic": {"objective": {"samples": 1, "mean": 0.3}},
+                "legacy": {"objective": {"samples": 1, "mean": 0.2}},
+                "paired": {"objective_delta": {"samples": 1, "mean": 0.1}},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            prefix = os.path.join(temp_dir, "reports", "stability")
+            paths = predict.export_backtest_report(report, prefix)
+            self.assertTrue(os.path.isfile(paths["json"]))
+            self.assertTrue(os.path.isfile(paths["runs_csv"]))
+            self.assertTrue(os.path.isfile(paths["summary_csv"]))
+            with open(paths["json"], "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            self.assertEqual(saved["report_schema_version"], "stability-report/v2")
+            with open(paths["runs_csv"], "r", encoding="utf-8-sig") as handle:
+                self.assertIn("objective_delta", handle.readline())
+
+    def test_rolling_calibration_folds_are_expanding_and_future_free(self):
+        records = self._build_mock_records(80)
+        folds = predict._build_rolling_calibration_folds(
+            records, train_cycles=12, validation_cycles=6, fold_count=2, min_history=30
+        )
+        self.assertEqual(len(folds), 2)
+        self.assertLess(len(folds[0]["train_records"]), len(folds[1]["train_records"]))
+        for fold in folds:
+            train_periods = {int(row["period"]) for row in fold["train_records"]}
+            validation_periods = {int(row["period"]) for row in fold["validation_targets"]}
+            self.assertTrue(train_periods.isdisjoint(validation_periods))
+            self.assertLess(max(train_periods), min(validation_periods))
+
+    def test_threshold_calibration_selects_on_train_and_evaluates_next_block(self):
+        records = self._build_mock_records(72)
+        calls = []
+
+        def fake_evaluator(eval_records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None):
+            strategy = runtime_config["fusion_params"]["anti_ticket_strategy"]
+            threshold = float(runtime_config["fusion_params"].get("anti_ticket_dynamic_one_score_threshold", 0.0))
+            calls.append((max(int(row["period"]) for row in eval_records), cycles, strategy, threshold))
+            base = threshold if strategy == "dynamic" else 0.1
+            return {"overall": {
+                "best_of_5_avg_score": base * 7.5,
+                "best_of_5_hit_rate_ge2": base,
+                "best_of_5_hit_rate_ge3": 0.0,
+                "best_of_5_hit_rate_ge4": 0.0,
+                "final_blue_hit_rate": 0.0,
+                "avg_overlap": 2.0,
+            }}
+
+        report = predict.team_threshold_calibration_report(
+            records,
+            train_cycles=12,
+            validation_cycles=4,
+            fold_count=2,
+            seeds=[7],
+            one_thresholds=[0.30, 0.50],
+            two_thresholds=[0.60],
+            gap_thresholds=[0.04],
+            grid_mode="cartesian",
+            evaluator=fake_evaluator,
+        )
+        self.assertEqual(report["report_schema_version"], "threshold-calibration/v1")
+        self.assertEqual(len(report["folds"]), 2)
+        self.assertTrue(all(fold["selected_thresholds"]["one_score_threshold"] == 0.5 for fold in report["folds"]))
+        for fold in report["folds"]:
+            self.assertLess(int(fold["train_end_period"]), int(fold["validation_start_period"]))
+        self.assertGreater(report["cache"]["hits"], 0)
+        self.assertTrue(calls)
+
+    def test_predict_help_includes_v7_stability_and_calibration_options(self):
+        project_root = os.path.abspath(os.path.dirname(__file__) or ".")
+        result = subprocess.run([sys.executable, "predict.py", "--help"], cwd=project_root, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        for option in (
+            "--stability-export-prefix",
+            "--team-threshold-calibration",
+            "--calibration-train-cycles",
+            "--calibration-validation-cycles",
+            "--calibration-folds",
+            "--calibration-seeds",
+            "--calibration-export-prefix",
+        ):
+            self.assertIn(option, result.stdout)
+
+
+
+    def test_save_compact_prediction_writes_additive_provenance_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_dir = predict.ARCHIVE_DIR
+            predict.ARCHIVE_DIR = temp_dir
+            try:
+                path = predict.save_compact_prediction(
+                    "2026999",
+                    [{"red": [1, 2, 3, 4, 5, 6], "blue": 7, "sources": ["hot"]}],
+                    "mode=team",
+                    metadata={
+                        "archive_schema_version": "2",
+                        "runtime_config_hash": "runtime123",
+                        "patch_config_hash": "patch123",
+                        "prediction_seed": "42",
+                        "git_commit": "abc123",
+                    },
+                )
+                content = Path(path).read_text(encoding="utf-8")
+            finally:
+                predict.ARCHIVE_DIR = old_dir
+        self.assertIn("archive_schema_version=2", content)
+        self.assertIn("runtime_config_hash=runtime123", content)
+        self.assertIn("patch_config_hash=patch123", content)
+        self.assertIn("prediction_seed=42", content)
+        self.assertIn("git_commit=abc123", content)
+        self.assertIn("ticket1=01 02 03 04 05 06+07|hot", content)
+
+    def test_build_archive_metadata_is_deterministic_and_hashes_patch_contents(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            patch_path = os.path.join(temp_dir, "param.json")
+            with open(patch_path, "w", encoding="utf-8") as handle:
+                handle.write('{"fusion_params":{"debate_factor":0.6}}')
+            first = predict.build_archive_metadata(
+                {"fusion_params": {"debate_factor": 0.6}},
+                prediction_seed=42,
+                patch_paths=[patch_path],
+                git_commit="abc123",
+            )
+            second = predict.build_archive_metadata(
+                {"fusion_params": {"debate_factor": 0.6}},
+                prediction_seed=42,
+                patch_paths=[patch_path],
+                git_commit="abc123",
+            )
+        self.assertEqual(first, second)
+        self.assertEqual(first["archive_schema_version"], "2")
+        self.assertEqual(first["prediction_seed"], "42")
+        self.assertEqual(first["git_commit"], "abc123")
+        self.assertNotEqual(first["patch_config_hash"], "none")
+
 
 
 if __name__ == "__main__":

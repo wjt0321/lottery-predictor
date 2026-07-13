@@ -115,7 +115,13 @@ python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
 
 # 运行 dynamic-vs-legacy 多窗口、多种子稳定性回测
-python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42
+python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --stability-seeds 7,42,101,202,777,2026 \
+  --stability-export-prefix prediction_archive/stability_report
+
+# 运行动态偏移阈值扩展窗口校准
+python predict.py --team-threshold-calibration --calibration-train-cycles 36 \
+  --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 \
+  --calibration-export-prefix prediction_archive/threshold_calibration
 ```
 
 **参数说明**：
@@ -131,6 +137,9 @@ python predict.py --team-stability-backtest --stability-windows 36,72 --stabilit
 - `--team-cover-backtest`: 运行 team-cover 实验模式对照回测（不写归档，输出 `team_cover` / `team` / `conditional_random` 三组口径）
 - `--team-stability-backtest`: 配对运行 `dynamic` 与 `legacy` 的多窗口、多种子稳定性回测，不写归档
 - `--stability-windows` / `--stability-seeds`: 逗号分隔的稳定性实验矩阵
+- `--stability-export-prefix`: 导出完整 JSON、逐 run CSV 和汇总 CSV
+- `--team-threshold-calibration`: 运行扩展时间窗动态偏移阈值校准；训练折只看验证区间之前的数据
+- `--calibration-*`: 控制训练期数、验证期数、折数、seed、候选阈值、网格模式和导出前缀
 - `--backtest-cycles`: team 端到端回测期数（默认36期）
 - `--backtest-use-current-patches`: 离线实验时显式加载当前补丁；默认关闭，避免未来归档信息泄漏到历史样本
 
@@ -323,13 +332,36 @@ python predict.py --team-cover-backtest --backtest-use-current-patches --backtes
 
 ### 稳定性与反事实回测（--team-stability-backtest）
 
-稳定性回测在相同窗口、相同 seed 下配对运行 `dynamic` 与 `legacy`，默认使用 clean runtime。报告包含每个 run 的完整 team 指标、固定综合目标、配对差值、均值/标准差/极值、正向 run 比例和 `mean - 0.5 × std` 稳健分。
+稳定性回测在相同窗口、相同 seed 下配对运行 `dynamic` 与 `legacy`，默认使用 clean runtime。报告包含每个 run 的完整 team 指标、固定综合目标、配对差值、均值/标准差/极值、中位数、四分位数、确定性 bootstrap 95% 置信区间、正负/持平次数、按窗口与 seed 分组结果，以及 `mean - 0.5 × std` 稳健分。
 
 ```bash
 python predict.py --team-stability-backtest \
-  --stability-windows 36,72,144,288 \
-  --stability-seeds 7,42,2026,20260714
+  --stability-windows 36,72,108,144 \
+  --stability-seeds 7,42,101,202,777,2026 \
+  --stability-export-prefix prediction_archive/stability_report
 ```
+
+导出文件为：
+
+- `prediction_archive/stability_report.json`：完整嵌套报告；
+- `prediction_archive/stability_report.runs.csv`：每个 window/seed 的配对结果；
+- `prediction_archive/stability_report.summary.csv`：扁平化汇总统计。
+
+### 动态偏移阈值滚动校准（--team-threshold-calibration）
+
+校准采用 expanding-window：每折只在较老训练前缀上选择阈值，然后在紧随其后的未见区间验证。默认使用单因素邻域网格以控制耗时；`cartesian` 仅建议用于明确的离线深度实验。
+
+```bash
+python predict.py --team-threshold-calibration \
+  --calibration-train-cycles 36 \
+  --calibration-validation-cycles 12 \
+  --calibration-folds 3 \
+  --calibration-seeds 42 \
+  --calibration-grid-mode one_factor \
+  --calibration-export-prefix prediction_archive/threshold_calibration
+```
+
+校准报告会比较“每折选出的阈值”“未调参默认 dynamic”“legacy”，并记录候选选择频率和缓存命中。它不会自动写回 `config/param_patch.latest.json`；只有人工复核跨折稳定性后才应生成或修改参数补丁。
 
 普通 `--team-backtest` 还会输出：
 
@@ -338,6 +370,12 @@ python predict.py --team-stability-backtest \
 - 最终蓝球按统一 `blue_score` 排名后的 top-1 / top-3 命中率和命中平均排名。
 
 这些指标只用于离线稳定性和排序校准诊断，不代表中奖概率，也不用于事后搜索参数。
+
+
+
+### 预测归档可复现元数据
+
+`team` 与 `team-cover` 仍使用原有 compact KV 归档格式，并增加向后兼容的可选键：`archive_schema_version=2`、`runtime_config_hash`、`patch_config_hash`、`prediction_seed`、`git_commit`。既有 `ticketN`、`ticketN_explain_json` 和 `lead_summary` 行保持不变；同一期重复预测仍写入时间戳文件，不覆盖原归档。
 
 
 ## 数据文件
@@ -414,7 +452,8 @@ python predict.py --team-stability-backtest \
 | 分析 | 高级综合分析 | `python predict.py --advanced --num 5` |
 | 分析 | team 端到端矩阵回测（带进度） | `python predict.py --team-backtest --backtest-cycles 36 --seed 42` |
 | 分析 | team-cover 对照回测（不写归档） | `python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42` |
-| 分析 | dynamic-vs-legacy 稳定性回测 | `python predict.py --team-stability-backtest --stability-windows 36,72 --stability-seeds 7,42` |
+| 分析 | dynamic-vs-legacy 稳定性回测并导出 | `python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --stability-seeds 7,42,101,202,777,2026 --stability-export-prefix prediction_archive/stability_report` |
+| 分析 | 动态偏移阈值扩展窗口校准 | `python predict.py --team-threshold-calibration --calibration-train-cycles 36 --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 --calibration-export-prefix prediction_archive/threshold_calibration` |
 | 分析 | 归档贡献分析与调参建议 | `python analyze_archive.py --archive-dir prediction_archive --recent-limit 20 --top-k 10` |
 | 分析 | 导出报告并写回三类补丁 | `python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report --latest-patch-path config/weight_patch.latest.json --latest-matrix-patch-path config/matrix_patch.latest.json --latest-param-patch-path config/param_patch.latest.json` |
 | 补丁回灌 | 显式加载权重补丁参与团队预测 | `python predict.py --mode team --weight-patch config/weight_patch.latest.json --num 5` |
