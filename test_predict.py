@@ -550,6 +550,25 @@ class PredictFlowTests(unittest.TestCase):
             predict.CONFIG.blue_cold_chase_cap,
         )
 
+    def test_project_config_exposes_scientific_offset_defaults(self):
+        fusion = predict.CONFIG.to_runtime_config()["fusion_params"]
+        self.assertEqual(fusion["anti_ticket_strategy"], "scientific")
+        self.assertEqual(fusion["anti_ticket_candidate_limit"], 6)
+        self.assertEqual(fusion["anti_ticket_standout_threshold"], 0.65)
+        self.assertEqual(fusion["anti_ticket_min_standout_agents"], 1)
+        self.assertEqual(fusion["anti_ticket_max_overlap"], 4)
+        self.assertEqual(fusion["anti_ticket_sum_quantile_low"], 0.10)
+        self.assertEqual(fusion["anti_ticket_sum_quantile_high"], 0.90)
+        self.assertEqual(
+            fusion["anti_ticket_score_weights"],
+            {
+                "counter_evidence": 0.35,
+                "coverage": 0.30,
+                "structure": 0.20,
+                "uncertainty": 0.15,
+            },
+        )
+
     def test_project_config_exposes_team_cover_defaults(self):
         runtime = predict.CONFIG.to_runtime_config()
         self.assertIn("cover_mode", runtime)

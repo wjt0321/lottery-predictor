@@ -1678,6 +1678,7 @@ def build_core_pool_snapshot(
         "red_pool": red_pool,
         "blue_pool": blue_pool,
         "red_scores": {ball: round(float(red_scores[ball]), 6) for ball in red_pool},
+        "red_scores_full": {ball: round(float(red_scores[ball]), 6) for ball in range(1, 34)},
         "blue_scores": {ball: round(float(blue_scores[ball]), 6) for ball in blue_pool},
         "pool_sources": {ball: sorted(pool_sources.get(ball, set())) for ball in red_pool},
         "blue_sources": {ball: sorted(blue_sources.get(ball, set())) for ball in blue_pool},
@@ -2147,6 +2148,10 @@ def _build_debate_pool(
     # 更新 snapshot
     snapshot["red_pool"] = new_red_pool
     snapshot["red_scores"] = {ball: round(float(merged_scores.get(ball, 0.0)), 6) for ball in new_red_pool}
+    snapshot["red_scores_full"] = {
+        ball: round(float(merged_scores.get(ball, 0.0)), 6)
+        for ball in range(1, 34)
+    }
     snapshot["debate_promoted"] = promoted
     snapshot["debate_demoted"] = demoted
     snapshot["debate_anti_scores"] = {ball: round(float(anti_scores.get(ball, 0.0)), 6) for ball in anti_reds}
@@ -2224,6 +2229,130 @@ def _build_blue_debate(
     snapshot["blue_debate_demoted"] = demoted
     return snapshot
 
+
+
+_OFFSET_EVIDENCE_AGENTS = ("hot", "cold", "missing", "cycle", "sum", "zone")
+
+
+def _normalize_score_map(values: Dict[int, float], neutral: float = 0.5) -> Dict[int, float]:
+    """Normalize a score map to 0..1 without inventing rank when all values tie."""
+    if not values:
+        return {}
+    low = min(float(value) for value in values.values())
+    high = max(float(value) for value in values.values())
+    if high - low <= 1e-12:
+        return {int(key): float(neutral) for key in values}
+    return {
+        int(key): (float(value) - low) / (high - low)
+        for key, value in values.items()
+    }
+
+
+def _score_dispersion(values: List[float]) -> float:
+    """Return a bounded 0..1 disagreement score for expert opinions."""
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return min(1.0, math.sqrt(variance) / 0.5)
+
+
+def _build_offset_candidate_profiles(
+    anti_candidates: List[int],
+    records: List[Dict],
+    lead_model: Dict[str, Dict[str, float]],
+    snapshot: Dict[str, object],
+    runtime_config: Optional[Dict[str, object]] = None,
+) -> List[Dict[str, object]]:
+    """Build explainable profiles for excluded reds with independent support.
+
+    Balanced is derived from other views and random is intentionally noisy, so
+    neither counts as independent evidence for a scientific offset candidate.
+    """
+    candidates = [
+        int(ball)
+        for ball in dict.fromkeys(anti_candidates)
+        if 1 <= int(ball) <= 33
+    ]
+    if not candidates:
+        return []
+
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    fusion = runtime.get("fusion_params", {}) or {}
+    candidate_limit = max(1, int(fusion.get("anti_ticket_candidate_limit", 6)))
+    standout_threshold = float(fusion.get("anti_ticket_standout_threshold", 0.65))
+    min_standout_agents = max(0, int(fusion.get("anti_ticket_min_standout_agents", 1)))
+
+    precomputed = _precompute_expert_analysis(records)
+    expert_scores: Dict[str, Dict[int, float]] = {}
+    for agent in _OFFSET_EVIDENCE_AGENTS:
+        evaluated = _expert_evaluate_anti_consensus(agent, records, candidates, precomputed)
+        expert_scores[agent] = {
+            ball: min(1.0, max(0.0, float(evaluated.get(ball, 0.0))))
+            for ball in candidates
+        }
+
+    raw_prior = snapshot.get("red_scores_full", {}) or {}
+    prior_values = {ball: float(raw_prior.get(ball, 0.0)) for ball in candidates}
+    normalized_prior = _normalize_score_map(prior_values, neutral=0.0)
+    lead_weights = lead_model.get("weights", {}) if isinstance(lead_model, dict) else {}
+    evidence_weight_total = sum(max(0.0, float(lead_weights.get(agent, 0.0))) for agent in _OFFSET_EVIDENCE_AGENTS)
+
+    profiles: List[Dict[str, object]] = []
+    for ball in candidates:
+        dimension_scores = {agent: expert_scores[agent][ball] for agent in _OFFSET_EVIDENCE_AGENTS}
+        if evidence_weight_total > 0:
+            weighted_support = sum(
+                dimension_scores[agent] * max(0.0, float(lead_weights.get(agent, 0.0)))
+                for agent in _OFFSET_EVIDENCE_AGENTS
+            ) / evidence_weight_total
+        else:
+            weighted_support = sum(dimension_scores.values()) / len(_OFFSET_EVIDENCE_AGENTS)
+        standout_agents = sorted(
+            agent for agent, score in dimension_scores.items()
+            if score >= standout_threshold
+        )
+        if len(standout_agents) < min_standout_agents:
+            continue
+        standout_ratio = len(standout_agents) / len(_OFFSET_EVIDENCE_AGENTS)
+        disagreement = _score_dispersion(list(dimension_scores.values()))
+        model_prior = normalized_prior.get(ball, 0.0)
+        counter_evidence = (
+            weighted_support * 0.50
+            + standout_ratio * 0.25
+            + disagreement * 0.15
+            + model_prior * 0.10
+        )
+        reasons = [f"expert_support:{','.join(standout_agents)}"]
+        if disagreement >= 0.35:
+            reasons.append("expert_disagreement")
+        if model_prior >= 0.5:
+            reasons.append("model_prior_not_bottom")
+        profiles.append(
+            {
+                "ball": ball,
+                "counter_evidence": round(float(counter_evidence), 6),
+                "weighted_support": round(float(weighted_support), 6),
+                "standout_agents": standout_agents,
+                "standout_ratio": round(float(standout_ratio), 6),
+                "disagreement": round(float(disagreement), 6),
+                "model_prior": round(float(model_prior), 6),
+                "dimension_scores": {
+                    agent: round(float(score), 6)
+                    for agent, score in dimension_scores.items()
+                },
+                "reasons": reasons,
+            }
+        )
+
+    profiles.sort(
+        key=lambda row: (
+            -float(row["counter_evidence"]),
+            -len(row["standout_agents"]),
+            int(row["ball"]),
+        )
+    )
+    return profiles[:candidate_limit]
 
 
 def _mix_anti_consensus_reds(

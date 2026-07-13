@@ -150,6 +150,58 @@ class AlgorithmCorrectnessTests(unittest.TestCase):
         self.assertAlmostEqual(by_agent["hot"]["score"], 0.1)
         self.assertEqual(by_agent["hot"]["exposure"], 10.0)
 
+    def test_core_pool_snapshot_preserves_all_33_red_scores(self):
+        teams = {
+            "hot": {
+                "proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}],
+                "error": "",
+            },
+            "cold": {
+                "proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 2}],
+                "error": "",
+            },
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+
+        snapshot = predict.build_core_pool_snapshot(
+            teams,
+            lead_model,
+            diff_factor=1.0,
+            runtime_config={"pool_params": {"core_red_pool_size": 6}},
+        )
+
+        self.assertEqual(set(snapshot["red_scores_full"]), set(range(1, 34)))
+        self.assertEqual(len(snapshot["red_scores"]), 6)
+        self.assertGreater(snapshot["red_scores_full"][1], 0.0)
+        self.assertEqual(snapshot["red_scores_full"][33], 0.0)
+
+    def test_red_debate_preserves_merged_scores_for_excluded_balls(self):
+        records = [
+            {"red_balls": [1, 2, 3, 4, 5, 6], "blue_ball": 1}
+            for _ in range(12)
+        ]
+        snapshot = {
+            "red_pool": list(range(1, 23)),
+            "red_scores": {ball: float(34 - ball) for ball in range(1, 23)},
+            "red_scores_full": {ball: -1.0 for ball in range(1, 34)},
+        }
+        lead_model = {
+            "weights": {agent: 1.0 / len(predict.AGENT_TEAMS) for agent in predict.AGENT_TEAMS},
+            "diff_scores": {agent: 0.0 for agent in predict.AGENT_TEAMS},
+        }
+
+        updated = predict._build_debate_pool(snapshot, records, lead_model)
+
+        self.assertEqual(set(updated["red_scores_full"]), set(range(1, 34)))
+        excluded = set(range(1, 34)) - set(updated["red_pool"])
+        self.assertTrue(excluded)
+        self.assertTrue(all(ball in updated["red_scores_full"] for ball in excluded))
+        self.assertNotEqual(updated["red_scores_full"][23], -1.0)
+
+
     def test_blue_debate_uses_full_scores_and_existing_engine_details(self):
         class FailingEngine:
             def predict(self, pool_size=16):
@@ -185,6 +237,86 @@ class AlgorithmCorrectnessTests(unittest.TestCase):
         updated = predict._build_blue_debate(snapshot, None)
         self.assertEqual(updated["blue_pool"], list(range(1, 11)))
         self.assertNotIn("blue_debate_promoted", updated)
+
+    def test_offset_profiles_require_independent_expert_support(self):
+        score_by_agent = {
+            "hot": {23: 0.90, 24: 0.20, 25: 0.20},
+            "cold": {23: 0.80, 24: 0.20, 25: 0.20},
+            "missing": {23: 0.20, 24: 0.20, 25: 0.20},
+            "cycle": {23: 0.20, 24: 0.20, 25: 0.75},
+            "sum": {23: 0.20, 24: 0.20, 25: 0.20},
+            "zone": {23: 0.20, 24: 0.20, 25: 0.20},
+            "balanced": {23: 0.10, 24: 0.99, 25: 0.10},
+            "random": {23: 0.10, 24: 1.00, 25: 0.10},
+        }
+        lead_model = {
+            "weights": {agent: 1.0 / len(predict.AGENT_TEAMS) for agent in predict.AGENT_TEAMS},
+            "diff_scores": {agent: 0.0 for agent in predict.AGENT_TEAMS},
+        }
+        runtime = {
+            "fusion_params": {
+                "anti_ticket_candidate_limit": 6,
+                "anti_ticket_standout_threshold": 0.65,
+                "anti_ticket_min_standout_agents": 1,
+            }
+        }
+
+        with mock.patch.object(predict, "_precompute_expert_analysis", return_value={"ready": True}), \
+             mock.patch.object(
+                 predict,
+                 "_expert_evaluate_anti_consensus",
+                 side_effect=lambda agent, records, balls, precomputed: {ball: score_by_agent[agent][ball] for ball in balls},
+             ):
+            profiles = predict._build_offset_candidate_profiles(
+                [23, 24, 25],
+                records=[],
+                lead_model=lead_model,
+                snapshot={"red_scores_full": {23: 0.10, 24: 0.01, 25: 0.05}},
+                runtime_config=runtime,
+            )
+
+        self.assertEqual([row["ball"] for row in profiles], [23, 25])
+        self.assertEqual(profiles[0]["standout_agents"], ["cold", "hot"])
+        self.assertNotIn("balanced", profiles[0]["standout_agents"])
+        self.assertNotIn("random", profiles[0]["standout_agents"])
+        self.assertTrue(all(isinstance(row["counter_evidence"], float) for row in profiles))
+        self.assertTrue(all(isinstance(reason, str) for reason in profiles[0]["reasons"]))
+
+    def test_offset_profiles_rank_supported_candidates_and_honor_limit(self):
+        score_by_agent = {
+            agent: {23: 0.80, 24: 0.68, 25: 0.10}
+            for agent in predict.AGENT_TEAMS
+        }
+        score_by_agent["cycle"] = {23: 0.95, 24: 0.20, 25: 0.10}
+        lead_model = {
+            "weights": {agent: 1.0 / len(predict.AGENT_TEAMS) for agent in predict.AGENT_TEAMS},
+            "diff_scores": {agent: 0.0 for agent in predict.AGENT_TEAMS},
+        }
+
+        with mock.patch.object(predict, "_precompute_expert_analysis", return_value={"ready": True}), \
+             mock.patch.object(
+                 predict,
+                 "_expert_evaluate_anti_consensus",
+                 side_effect=lambda agent, records, balls, precomputed: {ball: score_by_agent[agent][ball] for ball in balls},
+             ):
+            profiles = predict._build_offset_candidate_profiles(
+                [23, 24, 25],
+                records=[],
+                lead_model=lead_model,
+                snapshot={"red_scores_full": {23: 0.04, 24: 0.03, 25: 0.0}},
+                runtime_config={
+                    "fusion_params": {
+                        "anti_ticket_candidate_limit": 1,
+                        "anti_ticket_standout_threshold": 0.65,
+                        "anti_ticket_min_standout_agents": 1,
+                    }
+                },
+            )
+
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0]["ball"], 23)
+        self.assertGreater(profiles[0]["counter_evidence"], 0.0)
+
 
     def test_hybrid_anti_ticket_keeps_model_core(self):
         base = [1, 2, 3, 4, 5, 6]

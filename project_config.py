@@ -36,6 +36,17 @@ class ProjectConfig:
     min_ticket_decay: float = 0.55
     debate_factor: float = 0.6
     anti_ticket_red_count: int = 2
+    anti_ticket_strategy: str = "scientific"
+    anti_ticket_candidate_limit: int = 6
+    anti_ticket_standout_threshold: float = 0.65
+    anti_ticket_min_standout_agents: int = 1
+    anti_ticket_max_overlap: int = 4
+    anti_ticket_sum_quantile_low: float = 0.10
+    anti_ticket_sum_quantile_high: float = 0.90
+    anti_ticket_counter_evidence_weight: float = 0.35
+    anti_ticket_coverage_weight: float = 0.30
+    anti_ticket_structure_weight: float = 0.20
+    anti_ticket_uncertainty_weight: float = 0.15
     learning_rate: float = 0.25
     decay_gamma: float = 0.85
     default_learn_cycles: int = 30
@@ -85,6 +96,19 @@ class ProjectConfig:
                 "min_ticket_decay": self.min_ticket_decay,
                 "debate_factor": self.debate_factor,
                 "anti_ticket_red_count": self.anti_ticket_red_count,
+                "anti_ticket_strategy": self.anti_ticket_strategy,
+                "anti_ticket_candidate_limit": self.anti_ticket_candidate_limit,
+                "anti_ticket_standout_threshold": self.anti_ticket_standout_threshold,
+                "anti_ticket_min_standout_agents": self.anti_ticket_min_standout_agents,
+                "anti_ticket_max_overlap": self.anti_ticket_max_overlap,
+                "anti_ticket_sum_quantile_low": self.anti_ticket_sum_quantile_low,
+                "anti_ticket_sum_quantile_high": self.anti_ticket_sum_quantile_high,
+                "anti_ticket_score_weights": {
+                    "counter_evidence": self.anti_ticket_counter_evidence_weight,
+                    "coverage": self.anti_ticket_coverage_weight,
+                    "structure": self.anti_ticket_structure_weight,
+                    "uncertainty": self.anti_ticket_uncertainty_weight,
+                },
             },
             "position_params": {
                 "min_weight": self.pos_weight_min,
