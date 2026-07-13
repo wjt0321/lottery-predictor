@@ -318,6 +318,97 @@ class AlgorithmCorrectnessTests(unittest.TestCase):
         self.assertGreater(profiles[0]["counter_evidence"], 0.0)
 
 
+    def test_scientific_offset_selector_keeps_four_highest_confidence_core_reds(self):
+        profiles = [
+            {"ball": 23, "counter_evidence": 0.90, "disagreement": 0.40, "standout_agents": ["hot", "cycle"]},
+            {"ball": 24, "counter_evidence": 0.85, "disagreement": 0.35, "standout_agents": ["cold", "missing"]},
+        ]
+        records = [
+            {"red_balls": [1, 5, 10, 18, 25, 33], "blue_ball": 1}
+            for _ in range(10)
+        ]
+
+        result = predict._select_scientific_offset_reds(
+            base_reds=[1, 2, 3, 4, 5, 6],
+            profiles=profiles,
+            red_scores={1: 6.0, 2: 5.0, 3: 4.0, 4: 3.0, 5: 2.0, 6: 1.0},
+            existing_tickets=[],
+            records=records,
+            runtime_config={"fusion_params": {"anti_ticket_red_count": 2}},
+            seed=42,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["kept_core"], [1, 2, 3, 4])
+        self.assertEqual(result["offset_reds"], [23, 24])
+        self.assertEqual(result["red"], [1, 2, 3, 4, 23, 24])
+        self.assertIn("counter_evidence", result["score_breakdown"])
+
+    def test_scientific_offset_selector_prefers_broader_evidence_and_zone_coverage(self):
+        profiles = [
+            {"ball": 7, "counter_evidence": 0.80, "disagreement": 0.30, "standout_agents": ["hot"]},
+            {"ball": 8, "counter_evidence": 0.79, "disagreement": 0.30, "standout_agents": ["hot"]},
+            {"ball": 23, "counter_evidence": 0.78, "disagreement": 0.30, "standout_agents": ["cycle", "zone"]},
+        ]
+        records = [
+            {"red_balls": [1, 5, 10, 18, 25, 33], "blue_ball": 1}
+            for _ in range(10)
+        ]
+
+        result = predict._select_scientific_offset_reds(
+            base_reds=[1, 2, 12, 14, 5, 6],
+            profiles=profiles,
+            red_scores={1: 6.0, 2: 5.0, 12: 4.0, 14: 3.0, 5: 2.0, 6: 1.0},
+            existing_tickets=[],
+            records=records,
+            runtime_config={"fusion_params": {"anti_ticket_red_count": 2}},
+            seed=42,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIn(23, result["offset_reds"])
+        self.assertNotEqual(result["offset_reds"], [7, 8])
+
+    def test_scientific_offset_selector_rejects_invalid_combinations(self):
+        profiles = [
+            {"ball": 7, "counter_evidence": 0.95, "disagreement": 0.20, "standout_agents": ["hot"]},
+            {"ball": 9, "counter_evidence": 0.94, "disagreement": 0.20, "standout_agents": ["cold"]},
+            {"ball": 24, "counter_evidence": 0.80, "disagreement": 0.40, "standout_agents": ["cycle"]},
+            {"ball": 26, "counter_evidence": 0.79, "disagreement": 0.40, "standout_agents": ["zone"]},
+        ]
+        records = [
+            {"red_balls": [1, 5, 10, 18, 25, 33], "blue_ball": 1}
+            for _ in range(10)
+        ]
+
+        result = predict._select_scientific_offset_reds(
+            base_reds=[1, 2, 3, 4, 5, 6],
+            profiles=profiles,
+            red_scores={ball: float(7 - ball) for ball in range(1, 7)},
+            existing_tickets=[],
+            records=records,
+            runtime_config={"fusion_params": {"anti_ticket_red_count": 2}},
+            seed=42,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertTrue(any(ball >= 23 for ball in result["offset_reds"]))
+        self.assertGreaterEqual(result["constraints"]["zone_count"], 2)
+        self.assertGreaterEqual(result["constraints"]["odd_count"], 2)
+        self.assertLessEqual(result["constraints"]["odd_count"], 4)
+
+    def test_scientific_offset_selector_returns_none_without_two_candidates(self):
+        result = predict._select_scientific_offset_reds(
+            base_reds=[1, 2, 3, 4, 5, 6],
+            profiles=[{"ball": 23, "counter_evidence": 0.9, "disagreement": 0.4, "standout_agents": ["hot"]}],
+            red_scores={ball: float(7 - ball) for ball in range(1, 7)},
+            existing_tickets=[],
+            records=[],
+            seed=42,
+        )
+        self.assertIsNone(result)
+
+
     def test_hybrid_anti_ticket_keeps_model_core(self):
         base = [1, 2, 3, 4, 5, 6]
         scores = {n: float(34 - n) for n in range(1, 34)}

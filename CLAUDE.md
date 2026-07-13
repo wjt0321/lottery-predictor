@@ -63,8 +63,10 @@ main() → run_team_mode()
   ├── _build_debate_pool()         # 反共识辩论：专家评估11个被排除球 → 合并重排名取22
   ├── BlueBallEngine(records, blue_params).predict()  # 蓝球多维度打分
   ├── _build_blue_debate()         # 蓝球辩论：低分蓝球"偏科"强项晋升
-  ├── generate_rotation_matrix_tickets()  # 22红旋转矩阵压缩为 5 注 6+1
-  │     └── _select_blue_ball_for_row()   # 每行选蓝球，优先去重
+  ├── generate_team_matrix_tickets()      # 旋转矩阵 + 第5注科学偏移
+  │     ├── _build_offset_candidate_profiles() # 全33红球独立反证画像
+  │     ├── _select_scientific_offset_reds()   # 第5注偏移球约束组合搜索
+  │     └── _select_blue_ball_for_row()        # 每行选蓝球，优先去重
   └── _archive_prediction()        # 写入 prediction_archive/YYYYXXX.txt
 ```
 
@@ -82,7 +84,7 @@ main() → run_team_mode()
 `project_config.py::ProjectConfig` 是唯一配置来源，关键默认值：
 
 - **核心池**: `core_red_pool_size=22`, `core_blue_pool_size=10`, `rotation_matrix_type=”22_red_cover_6_to_5”`
-- **出票**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`
+- **出票**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`；第5注默认 `anti_ticket_strategy="scientific"`，保留4个核心并从独立反证候选中约束选择2个偏移球
 - **辩论**: `debate_factor=0.6`，控制反共识辩论影响力（越高反共识球越容易晋升）
 - **学习**: `learning_rate=0.25`, `decay_gamma=0.85`, `default_learn_cycles=30`
 - **蓝球**: 全部 `blue_*` 参数通过 `to_runtime_config()[“blue_params”]` 传入 `BlueBallEngine`

@@ -25,7 +25,8 @@ lottery_data.json ──→ predict.py (team mode pipeline)
                         ├── 5. _build_debate_pool(): anti-consensus debate (experts re-evaluate excluded 11 balls → re-rank)
                         ├── 6. BlueBallEngine.predict(): multi-dim blue scoring
                         ├── 7. _build_blue_debate(): blue anti-consensus debate (promote low-score blues with standout dimensions)
-                        ├── 8. generate_rotation_matrix_tickets(): 22-red → 5 tickets 6+1
+                        ├── 8. generate_team_matrix_tickets(): matrix + ticket-5 scientific offset
+                        │       └── weakest row becomes ticket 5: 4 core + 2 scientific offsets
                         └── 9. archive → prediction_archive/YYYYXXX.txt
 
 prediction_archive/ ──→ analyze_archive.py
@@ -63,8 +64,10 @@ run_team_mode()
   ├── _build_debate_pool()         # anti-consensus debate: experts re-evaluate excluded 11 balls
   ├── BlueBallEngine(records, blue_params).predict()  # blue ball scoring
   ├── _build_blue_debate()         # blue debate: promote low-score blues with standout dimensions
-  ├── generate_rotation_matrix_tickets()  # 22-red → 5 tickets 6+1
-  │     └── _select_blue_ball_for_row()   # blue dedup selection
+  ├── generate_team_matrix_tickets()      # matrix + ticket-5 scientific offset
+  │     ├── _build_offset_candidate_profiles() # independent counter-evidence over all 33 reds
+  │     ├── _select_scientific_offset_reds()   # constrained pair search for ticket 5
+  │     └── _select_blue_ball_for_row()        # blue dedup selection
   └── _archive_prediction()        # write archive
 ```
 
@@ -75,7 +78,7 @@ Backtest entry points: `_run_team_backtest()` / `_run_team_cover_backtest()`
 `project_config.py::ProjectConfig` — single source of truth:
 
 - **Pool**: `core_red_pool_size=22`, `core_blue_pool_size=10`, `rotation_matrix_type="22_red_cover_6_to_5"`
-- **Ticketing**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`
+- **Ticketing**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`; ticket 5 defaults to `anti_ticket_strategy="scientific"` and keeps 4 core + 2 evidence-backed offsets
 - **Debate**: `debate_factor=0.6`, controls anti-consensus debate influence strength
 - **Learning**: `learning_rate=0.25`, `decay_gamma=0.85`, `default_learn_cycles=30`
 - **Blue ball**: all `blue_*` params flow via `to_runtime_config()["blue_params"]` → `BlueBallEngine`
@@ -116,13 +119,13 @@ Missing patch files do not block prediction — system falls back gracefully.
 
 ## Current Behavior
 
-- `team` mode always outputs `5` tickets of `6+1`
-- Flow is expert proposals -> `build_core_pool_snapshot()` -> `generate_rotation_matrix_tickets()`
+- `team` mode always outputs `5` tickets of `6+1`; ticket 5 is the scientific offset ticket by default
+- Flow is expert proposals -> `build_core_pool_snapshot()` -> full-33 debate scores -> matrix tickets -> constrained scientific offset replacement
 - `team-cover` mode also outputs `5` tickets, writes compact archive output, and marks `lead_summary.mode=team_cover`
 - Position weights now affect core-pool scoring, not just row-local ordering
 - `blue_params` flows into `BlueBallEngine` and can be overridden by `param patch`
 - `row_weights` affects default matrix row order; current semantics are dynamic ordering, not dynamic elimination
-- `--team-backtest` prints progress and reports final 5-ticket metrics
+- `--team-backtest` prints progress and reports final 5-ticket metrics, including average ticket overlap
 - `--team-cover-backtest` prints three-way comparison metrics for `team_cover`, `team`, and `conditional_random`, and does not write archives
 - Backtests default to clean runtime config and no archive-derived weight prior; `--backtest-use-current-patches` is an explicit offline sensitivity experiment
 

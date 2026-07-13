@@ -304,6 +304,127 @@ class PredictFlowTests(unittest.TestCase):
             core_pool = ticket["explain_json"].get("core_pool", {})
             self.assertGreaterEqual(len(core_pool.get("red_pool", [])), 6)
 
+    def test_generate_team_matrix_tickets_uses_one_scientific_offset_ticket(self):
+        teams = {
+            "hot": {
+                "proposals": [
+                    {"red": [1, 2, 3, 4, 5, 6], "blue": 1},
+                    {"red": [1, 2, 3, 7, 8, 9], "blue": 2},
+                ],
+                "error": "",
+            },
+            "cold": {
+                "proposals": [
+                    {"red": [10, 11, 12, 13, 14, 15], "blue": 3},
+                    {"red": [16, 17, 18, 19, 20, 21], "blue": 4},
+                ],
+                "error": "",
+            },
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+        profiles = [
+            {"ball": 23, "counter_evidence": 0.9, "disagreement": 0.4, "standout_agents": ["hot"]},
+            {"ball": 24, "counter_evidence": 0.8, "disagreement": 0.3, "standout_agents": ["cold"]},
+        ]
+        selection = {
+            "red": [1, 2, 3, 4, 23, 24],
+            "kept_core": [1, 2, 3, 4],
+            "offset_reds": [23, 24],
+            "score": 0.75,
+            "score_breakdown": {"counter_evidence": 0.85, "coverage": 0.7, "structure": 0.6, "uncertainty": 0.35},
+            "score_weights": {"counter_evidence": 0.35, "coverage": 0.30, "structure": 0.20, "uncertainty": 0.15},
+            "constraints": {"zone_count": 3, "odd_count": 3, "sum": 57, "max_overlap": 4, "sum_relaxed": False},
+            "selected_profiles": profiles,
+        }
+
+        with mock.patch.object(predict, "_build_offset_candidate_profiles", return_value=profiles), \
+             mock.patch.object(predict, "_select_scientific_offset_reds", return_value=selection):
+            tickets = predict.generate_team_matrix_tickets(
+                teams,
+                lead_model,
+                diff_factor=1.0,
+                records=self._build_mock_records(40),
+                runtime_config={"fusion_params": {"anti_ticket_strategy": "scientific"}},
+                seed=42,
+            )
+
+        scientific = [
+            ticket for ticket in tickets
+            if ticket.get("explain_json", {}).get("strategy") == "scientific_offset_2"
+        ]
+        self.assertEqual(len(tickets), 5)
+        self.assertEqual(len(scientific), 1)
+        offset = scientific[0]
+        self.assertIs(tickets[-1], offset)
+        self.assertEqual(offset["red"], [1, 2, 3, 4, 23, 24])
+        detail = offset["explain_json"]["offset_strategy"]
+        self.assertEqual(detail["kept_core"], [1, 2, 3, 4])
+        self.assertEqual(detail["selected_offset_reds"], [23, 24])
+        self.assertIn("score_breakdown", detail)
+        other_blues = {ticket["blue"] for ticket in tickets if ticket is not offset}
+        self.assertNotIn(offset["blue"], other_blues)
+
+    def test_generate_team_matrix_tickets_can_use_legacy_offset_strategy(self):
+        teams = {
+            "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}], "error": ""},
+            "cold": {"proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 2}], "error": ""},
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+
+        with mock.patch.object(
+            predict,
+            "_build_offset_candidate_profiles",
+            side_effect=AssertionError("legacy must bypass scientific profiles"),
+        ):
+            tickets = predict.generate_team_matrix_tickets(
+                teams,
+                lead_model,
+                diff_factor=1.0,
+                records=self._build_mock_records(40),
+                runtime_config={"fusion_params": {"anti_ticket_strategy": "legacy"}},
+                seed=42,
+            )
+
+        legacy = [
+            ticket for ticket in tickets
+            if str(ticket.get("explain_json", {}).get("strategy", "")).startswith("anti_hybrid_")
+        ]
+        self.assertEqual(len(tickets), 5)
+        self.assertEqual(len(legacy), 1)
+
+
+    def test_generate_team_matrix_tickets_falls_back_when_scientific_profiles_are_empty(self):
+        teams = {
+            "hot": {"proposals": [{"red": [1, 2, 3, 4, 5, 6], "blue": 1}], "error": ""},
+            "cold": {"proposals": [{"red": [7, 8, 9, 10, 11, 12], "blue": 2}], "error": ""},
+        }
+        lead_model = {
+            "weights": {"hot": 0.5, "cold": 0.5},
+            "diff_scores": {"hot": 0.0, "cold": 0.0},
+        }
+
+        with mock.patch.object(predict, "_build_offset_candidate_profiles", return_value=[]):
+            tickets = predict.generate_team_matrix_tickets(
+                teams,
+                lead_model,
+                diff_factor=1.0,
+                records=self._build_mock_records(40),
+                runtime_config={"fusion_params": {"anti_ticket_strategy": "scientific"}},
+                seed=42,
+            )
+
+        self.assertEqual(len(tickets), 5)
+        self.assertTrue(
+            str(tickets[-1].get("explain_json", {}).get("strategy", "")).startswith("anti_hybrid_")
+        )
+
+
     def test_build_lead_agent_report(self):
         lead_model = {
             "weights": {"hot": 0.31, "cold": 0.12, "missing": 0.18, "balanced": 0.35, "random": 0.04},
@@ -1177,6 +1298,7 @@ class PredictFlowTests(unittest.TestCase):
         self.assertIn("best_of_5_hit_rate_ge4_plus_blue", report["overall"])
         self.assertIn("blue_pool_hit_rate", report["overall"])
         self.assertIn("final_blue_hit_rate", report["overall"])
+        self.assertIn("avg_overlap", report["overall"])
 
     def test_team_matrix_backtest_report_is_deterministic_with_seed(self):
         records = self._build_mock_records(72)

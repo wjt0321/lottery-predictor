@@ -2355,6 +2355,177 @@ def _build_offset_candidate_profiles(
     return profiles[:candidate_limit]
 
 
+def _linear_quantile(values: List[float], quantile: float) -> float:
+    """Return a deterministic linearly interpolated quantile."""
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    q = min(1.0, max(0.0, float(quantile)))
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * q
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def _red_zone(ball: int) -> int:
+    return min(3, max(1, (int(ball) - 1) // 11 + 1))
+
+
+def _offset_structure_bounds(
+    records: List[Dict],
+    low_quantile: float,
+    high_quantile: float,
+) -> Tuple[float, float, float]:
+    sums = [
+        float(sum(int(ball) for ball in row.get("red_balls", []) or []))
+        for row in records
+        if len(row.get("red_balls", []) or []) == 6
+    ]
+    if not sums:
+        return 21.0, 183.0, 102.0
+    low = _linear_quantile(sums, low_quantile)
+    high = _linear_quantile(sums, high_quantile)
+    if high < low:
+        low, high = high, low
+    median = _linear_quantile(sums, 0.5)
+    return low, high, median
+
+
+def _select_scientific_offset_reds(
+    base_reds: List[int],
+    profiles: List[Dict[str, object]],
+    red_scores: Dict[int, float],
+    existing_tickets: List[Dict[str, object]],
+    records: List[Dict],
+    runtime_config: Optional[Dict[str, object]] = None,
+    seed: Optional[int] = None,
+) -> Optional[Dict[str, object]]:
+    """Select two evidence-backed offset reds under structural constraints."""
+    runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
+    fusion = runtime.get("fusion_params", {}) or {}
+    anti_count = max(0, min(6, int(fusion.get("anti_ticket_red_count", 2))))
+    if anti_count != 2 or len(profiles) < 2:
+        return None
+
+    base_ranked = sorted(
+        dict.fromkeys(int(ball) for ball in base_reds if 1 <= int(ball) <= 33),
+        key=lambda ball: (-float(red_scores.get(ball, 0.0)), ball),
+    )
+    keep_count = 6 - anti_count
+    if len(base_ranked) < keep_count:
+        return None
+    kept_core = base_ranked[:keep_count]
+    kept_set = set(kept_core)
+    usable_profiles = [
+        row for row in profiles
+        if 1 <= int(row.get("ball", 0) or 0) <= 33
+        and int(row.get("ball", 0) or 0) not in kept_set
+    ]
+    if len(usable_profiles) < 2:
+        return None
+
+    max_overlap = max(0, min(6, int(fusion.get("anti_ticket_max_overlap", 4))))
+    low_q = float(fusion.get("anti_ticket_sum_quantile_low", 0.10))
+    high_q = float(fusion.get("anti_ticket_sum_quantile_high", 0.90))
+    sum_low, sum_high, sum_median = _offset_structure_bounds(records, low_q, high_q)
+    configured_weights = fusion.get("anti_ticket_score_weights", {}) or {}
+    weights = {
+        "counter_evidence": float(configured_weights.get("counter_evidence", 0.35)),
+        "coverage": float(configured_weights.get("coverage", 0.30)),
+        "structure": float(configured_weights.get("structure", 0.20)),
+        "uncertainty": float(configured_weights.get("uncertainty", 0.15)),
+    }
+    weight_total = sum(max(0.0, value) for value in weights.values()) or 1.0
+    weights = {key: max(0.0, value) / weight_total for key, value in weights.items()}
+    other_red_sets = [set(int(ball) for ball in ticket.get("red", []) or []) for ticket in existing_tickets]
+
+    def evaluate_pair(pair: Tuple[Dict[str, object], Dict[str, object]], enforce_sum: bool) -> Optional[Dict[str, object]]:
+        offset_reds = sorted(int(row["ball"]) for row in pair)
+        final_reds = sorted(kept_core + offset_reds)
+        if len(final_reds) != 6 or len(set(final_reds)) != 6:
+            return None
+        zone_count = len({_red_zone(ball) for ball in final_reds})
+        odd_count = sum(1 for ball in final_reds if ball % 2 == 1)
+        red_sum = sum(final_reds)
+        overlaps = [len(set(final_reds) & other) for other in other_red_sets]
+        max_actual_overlap = max(overlaps, default=0)
+        if zone_count < 2 or not 2 <= odd_count <= 4 or max_actual_overlap > max_overlap:
+            return None
+        if enforce_sum and not sum_low <= red_sum <= sum_high:
+            return None
+
+        counter_evidence = sum(float(row.get("counter_evidence", 0.0)) for row in pair) / 2.0
+        uncertainty = sum(float(row.get("disagreement", 0.0)) for row in pair) / 2.0
+        evidence_agents = {
+            str(agent)
+            for row in pair
+            for agent in row.get("standout_agents", []) or []
+        }
+        offset_zone_diversity = 1.0 if _red_zone(offset_reds[0]) != _red_zone(offset_reds[1]) else 0.0
+        numeric_spread = abs(offset_reds[1] - offset_reds[0]) / 32.0
+        evidence_coverage = len(evidence_agents) / len(_OFFSET_EVIDENCE_AGENTS)
+        coverage = min(1.0, evidence_coverage * 0.50 + offset_zone_diversity * 0.30 + numeric_spread * 0.20)
+
+        zone_quality = zone_count / 3.0
+        parity_quality = max(0.0, 1.0 - abs(odd_count - 3) / 3.0)
+        sum_radius = max(sum_high - sum_low, 1.0) / 2.0
+        sum_quality = max(0.0, 1.0 - abs(red_sum - sum_median) / max(sum_radius, 1.0))
+        structure = min(1.0, zone_quality * 0.40 + parity_quality * 0.30 + sum_quality * 0.30)
+        breakdown = {
+            "counter_evidence": round(counter_evidence, 6),
+            "coverage": round(coverage, 6),
+            "structure": round(structure, 6),
+            "uncertainty": round(uncertainty, 6),
+        }
+        total_score = sum(breakdown[key] * weights[key] for key in weights)
+        tie_break = _stable_int_seed("scientific-offset-pair", seed or 0, tuple(offset_reds))
+        return {
+            "red": final_reds,
+            "kept_core": sorted(kept_core),
+            "offset_reds": offset_reds,
+            "score": round(float(total_score), 6),
+            "score_breakdown": breakdown,
+            "score_weights": {key: round(value, 6) for key, value in weights.items()},
+            "constraints": {
+                "zone_count": zone_count,
+                "odd_count": odd_count,
+                "sum": red_sum,
+                "sum_low": round(sum_low, 3),
+                "sum_high": round(sum_high, 3),
+                "max_overlap": max_actual_overlap,
+                "sum_relaxed": not enforce_sum,
+            },
+            "selected_profiles": [dict(row) for row in pair],
+            "_tie_break": tie_break,
+        }
+
+    evaluated: List[Dict[str, object]] = []
+    for enforce_sum in (True, False):
+        for pair in combinations(usable_profiles, 2):
+            candidate = evaluate_pair(pair, enforce_sum=enforce_sum)
+            if candidate is not None:
+                evaluated.append(candidate)
+        if evaluated:
+            break
+    if not evaluated:
+        return None
+    evaluated.sort(
+        key=lambda row: (
+            -float(row["score"]),
+            int(row["_tie_break"]),
+            tuple(row["offset_reds"]),
+        )
+    )
+    selected = dict(evaluated[0])
+    selected.pop("_tie_break", None)
+    return selected
+
+
 def _mix_anti_consensus_reds(
     base_reds: List[int],
     anti_candidates: List[int],
@@ -2449,7 +2620,7 @@ def generate_team_matrix_tickets(
     # --- 旋转矩阵出票 + 共现信念增强 + 反共识覆盖 ---
     matrix_snapshot = dict(snapshot)
     full_pool = list(snapshot.get("red_pool", []))
-    full_scores = snapshot.get("red_scores", {})
+    full_scores = snapshot.get("red_scores_full", snapshot.get("red_scores", {}))
     matrix_snapshot["red_pool"] = full_pool[:22]
     matrix_snapshot["red_scores"] = {b: full_scores.get(b, 0.0) for b in full_pool[:22]}
     matrix_runtime = _deep_merge_dict(runtime, {"pool_params": {"core_red_pool_size": 22}})
@@ -2462,9 +2633,26 @@ def generate_team_matrix_tickets(
     all_33_set = set(range(1, 34))
     full_anti = sorted(all_33_set - consensus_22)
 
-    anti_red_count = int(runtime.get("fusion_params", {}).get("anti_ticket_red_count", 2))
+    fusion_params = runtime.get("fusion_params", {}) or {}
+    anti_red_count = int(fusion_params.get("anti_ticket_red_count", 2))
+    anti_strategy = str(fusion_params.get("anti_ticket_strategy", "scientific")).strip().lower()
 
-    def _build_anti_ticket(anti_idx: int, base_ticket: Dict[str, object]) -> Dict[str, object]:
+    def _select_offset_blue(other_tickets: List[Dict[str, object]], rng: random.Random) -> int:
+        used_blues = {int(ticket.get("blue", 0) or 0) for ticket in other_tickets}
+        blue_pool = [int(ball) for ball in snapshot.get("blue_pool", []) or [] if 1 <= int(ball) <= 16]
+        blue_scores_full = snapshot.get("blue_scores_full", snapshot.get("blue_scores", {})) or {}
+        ranked = sorted(
+            dict.fromkeys(blue_pool or range(1, 17)),
+            key=lambda ball: (-float(blue_scores_full.get(ball, 0.0)), ball),
+        )
+        for ball in ranked:
+            if ball not in used_blues:
+                return ball
+        if ranked:
+            return ranked[0]
+        return rng.randint(1, 16)
+
+    def _build_legacy_anti_ticket(anti_idx: int, base_ticket: Dict[str, object]) -> Dict[str, object]:
         anti_candidates = list(full_anti)
         if len(anti_candidates) < anti_red_count:
             extra = sorted(consensus_22, key=lambda b: full_scores.get(b, 0.0))
@@ -2479,28 +2667,152 @@ def generate_team_matrix_tickets(
             rng=rng_a,
         )
         bs_s, _ = _simple_blue_score(records) if records else ({}, [])
-        existing_b = {t.get("blue", 0) for t in tickets}
+        existing_b = {ticket.get("blue", 0) for ticket in tickets}
         anti_blue = rng_a.randint(1, 16)
         if bs_s:
-            for b, _ in sorted(bs_s.items(), key=lambda x: -x[1]):
-                if b not in existing_b:
-                    anti_blue = b
+            for ball, _ in sorted(bs_s.items(), key=lambda item: -item[1]):
+                if ball not in existing_b:
+                    anti_blue = ball
                     break
         strategy = f"anti_hybrid_{anti_red_count}"
-        return {"red": anti_reds, "blue": anti_blue, "sources": ["anti_consensus"],
-            "explain": f"反共识混合票{anti_idx+1};探索红球数={anti_red_count};红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
-            "explain_json": {"sources": ["anti_consensus"], "strategy": strategy,
-                "red": [{"ball": int(b), "top_agent": "anti" if b in full_anti else "model", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
-                "blue": {"ball": int(anti_blue), "top_agent": "anti", "top_contribution": 0.0, "agent_contributions": {}},
-                "core_pool": {"red_pool": full_anti}, "diversity_replacements": [], "tier_strategy": strategy,
-                "replaced_matrix_row_id": base_ticket.get("matrix_row_id")},
-            "diversity_replacements": [], "matrix_row_id": 5 + anti_idx + 1}
+        return {
+            "red": anti_reds,
+            "blue": anti_blue,
+            "sources": ["anti_consensus"],
+            "explain": (
+                f"反共识混合票{anti_idx + 1};探索红球数={anti_red_count};"
+                f"红球={' '.join(f'{ball:02d}' for ball in anti_reds)};蓝球={anti_blue:02d}"
+            ),
+            "explain_json": {
+                "sources": ["anti_consensus"],
+                "strategy": strategy,
+                "red": [
+                    {
+                        "ball": int(ball),
+                        "top_agent": "anti" if ball in full_anti else "model",
+                        "top_contribution": 0.0,
+                        "agent_contributions": {},
+                    }
+                    for ball in anti_reds
+                ],
+                "blue": {
+                    "ball": int(anti_blue),
+                    "top_agent": "anti",
+                    "top_contribution": 0.0,
+                    "agent_contributions": {},
+                },
+                "core_pool": {"red_pool": full_anti},
+                "diversity_replacements": [],
+                "tier_strategy": strategy,
+                "replaced_matrix_row_id": base_ticket.get("matrix_row_id"),
+            },
+            "diversity_replacements": [],
+            "matrix_row_id": 5 + anti_idx + 1,
+        }
+
+    def _build_scientific_offset_ticket(
+        anti_idx: int,
+        base_ticket: Dict[str, object],
+        other_tickets: List[Dict[str, object]],
+    ) -> Optional[Dict[str, object]]:
+        profiles = _build_offset_candidate_profiles(
+            full_anti,
+            records or [],
+            lead_model,
+            snapshot,
+            runtime_config=runtime,
+        )
+        selection = _select_scientific_offset_reds(
+            list(base_ticket.get("red", [])),
+            profiles,
+            full_scores,
+            existing_tickets=other_tickets,
+            records=records or [],
+            runtime_config=runtime,
+            seed=seed,
+        )
+        if not selection:
+            return None
+        offset_reds = set(int(ball) for ball in selection.get("offset_reds", []) or [])
+        final_reds = [int(ball) for ball in selection.get("red", []) or []]
+        if len(final_reds) != 6 or len(set(final_reds)) != 6:
+            return None
+        offset_seed = seed or _stable_int_seed("scientific-offset-blue", tuple(final_reds))
+        rng = random.Random(offset_seed)
+        blue = _select_offset_blue(other_tickets, rng)
+        strategy = f"scientific_offset_{len(offset_reds)}"
+        offset_detail = {
+            "candidate_profiles": profiles,
+            "kept_core": list(selection.get("kept_core", [])),
+            "selected_offset_reds": sorted(offset_reds),
+            "score": float(selection.get("score", 0.0)),
+            "score_breakdown": dict(selection.get("score_breakdown", {})),
+            "score_weights": dict(selection.get("score_weights", {})),
+            "constraints": dict(selection.get("constraints", {})),
+            "selected_profiles": list(selection.get("selected_profiles", [])),
+            "replaced_matrix_row_id": base_ticket.get("matrix_row_id"),
+        }
+        red_agent_contrib = snapshot.get("red_agent_contrib", {}) or {}
+        return {
+            "red": sorted(final_reds),
+            "blue": blue,
+            "sources": ["scientific_offset"],
+            "explain": (
+                f"科学偏移票{anti_idx + 1};保留核心="
+                f"{' '.join(f'{ball:02d}' for ball in offset_detail['kept_core'])};"
+                f"偏移红球={' '.join(f'{ball:02d}' for ball in sorted(offset_reds))};"
+                f"组合分={float(selection.get('score', 0.0)):.3f};蓝球={blue:02d}"
+            ),
+            "explain_json": {
+                "sources": ["scientific_offset"],
+                "strategy": strategy,
+                "red": [
+                    {
+                        "ball": int(ball),
+                        "top_agent": "offset" if ball in offset_reds else "model",
+                        "top_contribution": 0.0,
+                        "agent_contributions": {
+                            str(agent): round(float(value), 6)
+                            for agent, value in (red_agent_contrib.get(ball, {}) or {}).items()
+                        },
+                    }
+                    for ball in sorted(final_reds)
+                ],
+                "blue": {
+                    "ball": int(blue),
+                    "top_agent": "blue_engine",
+                    "top_contribution": round(float((snapshot.get("blue_scores_full", {}) or {}).get(blue, 0.0)), 6),
+                    "agent_contributions": {},
+                },
+                "core_pool": {
+                    "red_pool": list(full_pool[:22]),
+                    "blue_pool": list(snapshot.get("blue_pool", []) or []),
+                },
+                "offset_strategy": offset_detail,
+                "diversity_replacements": [],
+                "tier_strategy": strategy,
+                "replaced_matrix_row_id": base_ticket.get("matrix_row_id"),
+            },
+            "diversity_replacements": [],
+            "matrix_row_id": int(base_ticket.get("matrix_row_id", 0) or 0),
+        }
 
     if len(tickets) >= 5:
-        sorted_idx = sorted(range(len(tickets)),
-            key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", []))))
+        sorted_idx = sorted(
+            range(len(tickets)),
+            key=lambda index: sum(full_scores.get(ball, 0.0) for ball in tickets[index].get("red", []))
+            / max(1, len(tickets[index].get("red", []))),
+        )
         weakest_idx = sorted_idx[0]
-        tickets[weakest_idx] = _build_anti_ticket(0, tickets[weakest_idx])
+        base_ticket = tickets[weakest_idx]
+        other_tickets = [ticket for index, ticket in enumerate(tickets) if index != weakest_idx]
+        replacement = None
+        if anti_strategy == "scientific":
+            replacement = _build_scientific_offset_ticket(0, base_ticket, other_tickets)
+        if replacement is None:
+            replacement = _build_legacy_anti_ticket(0, base_ticket)
+        tickets.pop(weakest_idx)
+        tickets.append(replacement)
 
     return tickets[:5]
 
@@ -3319,6 +3631,7 @@ def team_matrix_backtest_report(
                 "best_of_5_hit_rate_ge4_plus_blue": 0.0,
                 "blue_pool_hit_rate": 0.0,
                 "final_blue_hit_rate": 0.0,
+                "avg_overlap": 0.0,
             },
             "matrix_rows": [],
         }
@@ -3338,6 +3651,7 @@ def team_matrix_backtest_report(
         "best_of_5_hit_rate_ge4_plus_blue": 0.0,
         "blue_pool_hit_rate": 0.0,
         "final_blue_hit_rate": 0.0,
+        "avg_overlap": 0.0,
     }
     matrix_rows: Dict[int, Dict[str, float]] = {}
     ticket_count_total = 0
@@ -3420,6 +3734,7 @@ def team_matrix_backtest_report(
         overall["best_of_5_hit_count_ge4_plus_blue"] += 1 if ge4_plus_blue_any else 0
         overall["blue_pool_hit_rate"] += 1.0 if blue_pool_hit else 0.0
         overall["final_blue_hit_rate"] += 1.0 if blue_hit_any else 0.0
+        overall["avg_overlap"] += _average_ticket_overlap(tickets)
 
     sample_count = max(1, int(overall["samples"]))
     overall["avg_ticket_score"] = round(overall["avg_ticket_score"] / max(ticket_count_total, 1), 6)
@@ -3433,6 +3748,7 @@ def team_matrix_backtest_report(
     overall["best_of_5_hit_rate_ge4_plus_blue"] = round(overall["best_of_5_hit_count_ge4_plus_blue"] / sample_count, 6)
     overall["blue_pool_hit_rate"] = round(overall["blue_pool_hit_rate"] / sample_count, 6)
     overall["final_blue_hit_rate"] = round(overall["final_blue_hit_rate"] / sample_count, 6)
+    overall["avg_overlap"] = round(overall["avg_overlap"] / sample_count, 6)
 
     matrix_row_report = []
     for bucket in matrix_rows.values():
@@ -3886,7 +4202,8 @@ def main():
             f"{overall.get('best_of_5_hit_rate_ge4_plus_blue', 0):.2%}"
         )
         print(
-            f"  - 最终5注蓝球命中率 {overall['final_blue_hit_rate']:.2%}"
+            f"  - 最终5注蓝球命中率 {overall['final_blue_hit_rate']:.2%} | "
+            f"组合平均重叠度 {overall.get('avg_overlap', 0):.3f}"
         )
         if team_backtest["matrix_rows"]:
             print("  - 矩阵行表现:")

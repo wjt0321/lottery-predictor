@@ -209,3 +209,21 @@ Report best-of-5 average score, red2+/red3+/red4+, same-ticket 4+1, at-least-4-p
 **Step 4: Commit**
 
 Stage source, tests, docs, and plan; commit with a focused feature message.
+
+## Verification Result (2026-07-13)
+
+Clean walk-forward comparison on the same 36 samples with `seed=42` (no archive patches):
+
+| Metric | Scientific | Legacy | Delta |
+|---|---:|---:|---:|
+| Average ticket score | 1.2250 | 1.1917 | +0.0333 |
+| Best-of-5 average score | 2.5417 | 2.5278 | +0.0139 |
+| Red 2+ rate | 88.89% | 94.44% | -5.56 pp |
+| Red 3+ rate | 38.89% | 36.11% | +2.78 pp |
+| Red 4+ rate | 5.56% | 2.78% | +2.78 pp |
+| Same-ticket 4 red + blue | 0/36 | 0/36 | 0 |
+| At least 4 red + blue | 0/36 | 0/36 | 0 |
+| Final blue hit rate | 30.56% | 30.56% | 0 |
+| Average overlap | 0.800 | 0.800 | 0 |
+
+The scientific path produced `scientific_offset_2` in all 36 samples. These results satisfy the implementation acceptance guardrails, but the sample is small and the rare joint-hit metrics remain zero; they do not establish a durable predictive advantage. No post-hoc parameter tuning was performed.
