@@ -36,6 +36,8 @@
 - 🤖 **8-Agent团队模式**：先聚合核心号码池，再用旋转矩阵固定出票 5 注
 - 🎯 **V5 命中率优化**：蓝球去重与配置回灌、端到端 team 回测、矩阵行动态排序、位置权重前移
 - 🧭 **V6 动态科学偏移**：第 5 注按事前证据动态选择 0/1/2 个偏移球，并保留原矩阵票用于反事实归因
+- 📊 **V7 稳定性与滚动校准**：配对 dynamic/legacy 多窗口回测、bootstrap 置信区间和 expanding-window 阈值验证
+- 🛡️ **V8 可审计晋升**：参数晋升门禁、归档版本分组、回测上下文缓存，以及报告/归档辅助模块拆分
 
 ## 功能特点
 
@@ -122,6 +124,13 @@ python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --
 python predict.py --team-threshold-calibration --calibration-train-cycles 36 \
   --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 \
   --calibration-export-prefix prediction_archive/threshold_calibration
+
+# 审核校准参数是否具备晋升资格（只生成审计结论/候选补丁，不激活 latest）
+python parameter_promotion.py \
+  --calibration-report prediction_archive/threshold_calibration.json \
+  --stability-report prediction_archive/stability_report.json \
+  --output prediction_archive/promotion_decision.json \
+  --candidate-patch-output config/param_patch.candidate.json
 ```
 
 **参数说明**：
@@ -160,7 +169,7 @@ python manual_data_import.py --txt data.txt
 
 ### 4. analyze_archive.py - 归档分析与补丁导出
 
-读取 `prediction_archive` 中的 `ticketN_explain_json`，并自动用本地 `lottery_data.json` 回填已开奖期的真实命中结果。分析器会输出命中贡献排行、双视角差异、建议权重增减量、矩阵行表现，并可导出报告与三类补丁；如果找不到真实结果，则回退为解释贡献统计。
+读取 `prediction_archive` 中的 `ticketN_explain_json`，并自动用本地 `lottery_data.json` 回填已开奖期的真实命中结果。分析器会输出命中贡献排行、双视角差异、建议权重增减量、矩阵行表现，并按 `archive_schema_version + git_commit + runtime_config_hash + patch_config_hash` 对归档版本分组；导出结果额外包含 `.versions.csv`。如果找不到真实结果，则回退为解释贡献统计。
 
 ```bash
 # 基础分析
@@ -189,6 +198,7 @@ python analyze_archive.py \
   - `.weight_patch.json`
   - `.matrix_patch.json`
   - `.param_patch.json`
+  - `.versions.csv`（版本级样本数、期数、seed 分布与命中指标）
 - `--latest-patch-path`: 固定写回最新权重补丁路径（默认 `config/weight_patch.latest.json`）
 - `--latest-matrix-patch-path`: 固定写回最新矩阵补丁路径（默认 `config/matrix_patch.latest.json`）
 - `--latest-param-patch-path`: 固定写回最新参数补丁路径（默认 `config/param_patch.latest.json`）
@@ -470,7 +480,11 @@ lottery-predictor/
 ├── README.md                 # 本文档
 ├── SKILL.md                  # Claude 技能文档
 ├── agent_registry.py         # 共享专家注册表（8 专家固定集合）
-├── analyze_archive.py        # 归档分析与补丁导出
+├── analyze_archive.py        # 归档分析、版本分组与补丁导出
+├── archive_provenance.py     # 归档 schema/runtime/patch/seed/commit 元数据
+├── backtest_cache.py         # 有界 LRU 回测上下文缓存与遥测
+├── backtest_reporting.py     # stability/calibration 统计与报告导出辅助
+├── parameter_promotion.py    # 基于证据门禁的参数候选晋升审核
 ├── blue_ball_engine.py       # 独立蓝球预测引擎（7 维度分析）
 ├── enhanced_analysis.py      # 增强分析（奖池影响、数据融合）
 ├── feature_importance.py     # 特征重要性分析（相关系数）
@@ -480,7 +494,7 @@ lottery-predictor/
 ├── update_data.py            # 数据更新脚本
 ├── visual_analyzer.py        # 可视化图表生成（matplotlib 可选）
 ├── lottery_data.json         # 数据文件（自动创建）
-├── test_*.py                 # 单元测试（4 个测试文件）
+├── test_*.py                 # 核心流程、归档、缓存、晋升与拆分模块测试
 ├── config/
 │   ├── weight_patch.latest.json  # 最新专家权重补丁
 │   ├── matrix_patch.latest.json  # 最新矩阵补丁
@@ -559,6 +573,14 @@ prediction_archive/ ──→ analyze_archive.py
 5. **组合策略**：团队模式比单策略更稳定
 
 ## 更新日志
+
+- **2026-07-14 (V8)**:
+  - 数据更新至 `2026079`；完整 stability 的 24 组配对运行中 dynamic 为正 19 组，目标差 95% CI 为 `[+0.004390, +0.014148]`；36 期子组仍不稳定
+  - rolling calibration 的默认阈值 `0.42/0.58/0.04` 未被候选显著超越，因此本轮参数晋升结论为 `hold`
+  - 新增 `parameter_promotion.py`：所有证据门禁通过后只写候选补丁，拒绝覆盖 `param_patch.latest.json`，仍需人工审核
+  - `analyze_archive.py` 增加可复现版本分组，并导出 `.versions.csv`
+  - stability/calibration 复用有界回测上下文缓存并输出遥测；本地小规模烟测约为未缓存路径的 `1.97x`，实际收益取决于窗口与机器
+  - 从 `predict.py` 提取 `backtest_reporting.py` 与 `archive_provenance.py`，保留原有导入名称和 CLI 行为
 
 - **2026-05-16 (V5)**:
   - 蓝球覆盖修复：5 注蓝球优先去重，且同样输入的蓝球选择可复现

@@ -40,11 +40,15 @@ prediction_archive/ ──→ analyze_archive.py
 
 | File | Role | Key Notes |
 |------|------|-----------|
-| `predict.py` | Main entry (~3500 lines) | team/single/team-cover modes; backtests; patch injection; anti-consensus debate |
+| `predict.py` | Main entry / orchestration | team/single/team-cover modes; ticket generation; backtest workflows; patch injection; anti-consensus debate |
 | `project_config.py` | **Central config** | `ProjectConfig` dataclass → `to_runtime_config()` produces pool/fusion/matrix/blue/cover param groups |
 | `agent_registry.py` | Expert registry | Fixed 8-expert set, excludes lstm |
 | `blue_ball_engine.py` | Blue ball engine | 7-dim analysis (missing/parity/zone/amplitude/heat/moving-avg/Bayesian); params via config dict |
-| `analyze_archive.py` | Offline analyzer | Reads archive KV format, backfills real results, exports 3 patch types + CSV/JSON reports |
+| `analyze_archive.py` | Offline analyzer | Reads archive KV, backfills results, groups by reproducible version identity, exports 3 patch types + JSON/CSV/versions CSV |
+| `archive_provenance.py` | Archive provenance | Canonical runtime/patch hashes plus schema/seed/commit metadata |
+| `backtest_reporting.py` | Backtest reporting | Stability statistics, bootstrap CI, rolling-fold/candidate helpers, JSON/CSV export |
+| `backtest_cache.py` | Backtest cache | Bounded LRU cache for invariant sample contexts, deterministic keys, telemetry |
+| `parameter_promotion.py` | Promotion guard | Evidence gates; writes audit decision and candidate patch only; never activates latest patch |
 | `enhanced_analysis.py` | Enhanced analysis | Pool influence, extended data fusion weights |
 | `feature_importance.py` | Feature importance | Pearson/Spearman correlation, zero extra deps |
 | `visual_analyzer.py` | Visualization | matplotlib charts (optional dep) |
@@ -116,7 +120,7 @@ Missing patch files do not block prediction — system falls back gracefully.
 - Repo maintainer notes: `AGENT.md`
 - Claude Code entry: `CLAUDE.md`
 - Skill trigger guide: `SKILL.md`
-- Current iteration plan: `docs/plans/2026-07-14-v7-stability-calibration-implementation-plan.md`
+- Current iteration plan: `docs/plans/2026-07-14-v8-promotion-versioned-analysis-implementation-plan.md`
 - Historical design docs: `docs/plans/`
 
 ## Current Behavior
@@ -131,6 +135,9 @@ Missing patch files do not block prediction — system falls back gracefully.
 - `--team-cover-backtest` prints three-way comparison metrics for `team_cover`, `team`, and `conditional_random`, and does not write archives
 - `--team-stability-backtest` pairs dynamic and legacy across windows/seeds, reports quantiles/bootstrap CI/grouped outcomes and robust score, can export JSON/CSV, and does not write archives
 - `--team-threshold-calibration` uses expanding training prefixes and the immediately following unseen validation blocks; it can export JSON/CSV and never auto-writes a param patch
+- Stability/calibration share bounded invariant-context caches and expose additive cache telemetry; cached and uncached reports must remain equivalent apart from telemetry
+- `parameter_promotion.py` requires every configured evidence gate to pass, writes only `param_patch.candidate.json`-style output, refuses `param_patch.latest.json`, and requires human activation
+- `analyze_archive.py` groups tickets by schema/commit/runtime/patch identity; missing provenance is `legacy-unversioned`; exports `<prefix>.versions.csv`
 - Backtests default to clean runtime config and no archive-derived weight prior; `--backtest-use-current-patches` is an explicit offline sensitivity experiment
 
 ## Hard Constraints
@@ -155,6 +162,7 @@ python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --stability-seeds 7,42,101,202,777,2026 --stability-export-prefix prediction_archive/stability_report
 python predict.py --team-threshold-calibration --calibration-train-cycles 36 --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 --calibration-export-prefix prediction_archive/threshold_calibration
+python parameter_promotion.py --calibration-report prediction_archive/threshold_calibration.json --stability-report prediction_archive/stability_report.json --output prediction_archive/promotion_decision.json --candidate-patch-output config/param_patch.candidate.json
 # Offline sensitivity experiment only:
 python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 
@@ -178,5 +186,7 @@ python -m unittest test_predict.PredictFlowTests.test_agent_teams_excludes_lstm 
 - Config changes: `project_config.py` AND `blue_ball_engine.py` AND `to_runtime_config()` output AND `param_patch` injection
 - `BlueBallEngine` param changes: `project_config.py` `blue_*` fields AND `to_runtime_config()["blue_params"]`
 - Backtest metric changes: `README.md` command examples and wording
+- Reporting/provenance helper changes: keep `predict.py` re-export compatibility plus `test_backtest_reporting.py` / `test_archive_provenance.py`
+- Promotion-gate changes: keep audit schema, latest-patch refusal, README/SKILL/CLAUDE docs, and tests aligned
 - Stability changes: keep dynamic/legacy paired runs, counterfactual fields, blue calibration, CLI docs, and tests aligned
 - team-cover behavior changes: keep `README.md`, `SKILL.md`, `AGENTS.md`, and `test_predict.py` aligned
