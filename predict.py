@@ -20,6 +20,7 @@ import math
 from agent_registry import AGENT_TEAMS
 from project_config import GLOBAL_CONFIG
 from blue_ball_engine import BlueBallEngine
+from backtest_cache import BacktestContextCache, make_backtest_context_key
 
 logging.basicConfig(
     level=logging.INFO,
@@ -3992,6 +3993,7 @@ def team_stability_backtest_report(
     seeds = tuple(dict.fromkeys(int(seed) for seed in seeds))
     clean_runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
     runs: List[Dict[str, object]] = []
+    context_cache = BacktestContextCache(max_entries=2)
     metric_names = (
         "objective",
         "best_of_5_avg_score",
@@ -4012,11 +4014,11 @@ def team_stability_backtest_report(
             legacy_runtime = _deep_merge_dict(clean_runtime, {"fusion_params": {"anti_ticket_strategy": "legacy"}})
             dynamic = team_matrix_backtest_report(
                 records, cycles=window, seed=seed, runtime_config=dynamic_runtime,
-                initial_weights=initial_weights,
+                initial_weights=initial_weights, context_cache=context_cache,
             )
             legacy = team_matrix_backtest_report(
                 records, cycles=window, seed=seed, runtime_config=legacy_runtime,
-                initial_weights=initial_weights,
+                initial_weights=initial_weights, context_cache=context_cache,
             )
             dynamic_overall = dynamic.get("overall", {})
             legacy_overall = legacy.get("overall", {})
@@ -4055,6 +4057,7 @@ def team_stability_backtest_report(
         "seeds": list(seeds),
         "runs": runs,
         "aggregate": aggregate,
+        "context_cache": {"enabled": True, **context_cache.snapshot()},
         "guardrails": {
             "no_archive_write": True,
             "fixed_ticket_count": 5,
@@ -4243,6 +4246,7 @@ def team_threshold_calibration_report(
         records, train_cycles=train_cycles, validation_cycles=validation_cycles, fold_count=fold_count
     )
     evaluate = evaluator or team_matrix_backtest_report
+    context_cache = BacktestContextCache(max_entries=4) if evaluator is None else None
     cache: Dict[Tuple[object, ...], Dict[str, object]] = {}
     cache_hits = 0
     cache_misses = 0
@@ -4256,10 +4260,15 @@ def team_threshold_calibration_report(
             cache_hits += 1
             return cache[key]
         cache_misses += 1
-        cache[key] = evaluate(
-            eval_records, cycles=int(cycles), seed=int(seed), runtime_config=runtime,
-            initial_weights=initial_weights,
-        )
+        kwargs = {
+            "cycles": int(cycles),
+            "seed": int(seed),
+            "runtime_config": runtime,
+            "initial_weights": initial_weights,
+        }
+        if context_cache is not None:
+            kwargs["context_cache"] = context_cache
+        cache[key] = evaluate(eval_records, **kwargs)
         return cache[key]
 
     base_fusion = base_runtime.get("fusion_params", {}) or {}
@@ -4363,6 +4372,7 @@ def team_threshold_calibration_report(
             "selection_frequency": selection_frequency,
         },
         "cache": {"entries": len(cache), "hits": cache_hits, "misses": cache_misses},
+        "context_cache": ({"enabled": True, **context_cache.snapshot()} if context_cache is not None else {"enabled": False}),
         "guardrails": {
             "expanding_window": True,
             "future_data_in_training": False,
@@ -4372,6 +4382,52 @@ def team_threshold_calibration_report(
     }
 
 
+def _context_cache_telemetry(context_cache: Optional[BacktestContextCache]) -> Dict[str, object]:
+    if context_cache is None:
+        return {"enabled": False}
+    return {"enabled": True, **context_cache.snapshot()}
+
+
+def _prepare_team_backtest_contexts(
+    records: List[Dict],
+    cycles: int,
+    seed: Optional[int],
+    initial_weights: Optional[Dict[str, float]],
+    context_cache: Optional[BacktestContextCache],
+) -> List[Dict[str, object]]:
+    ticket_count = resolve_team_ticket_count(TEAM_TICKET_COUNT)
+
+    def prepare() -> List[Dict[str, object]]:
+        raw_samples = list(iterate_archived_cycles(records, cycles=cycles))
+        lead_learning_cycles = max(8, min(12, cycles))
+        lead_window_sizes = (lead_learning_cycles, max(lead_learning_cycles * 2, 24))
+        contexts: List[Dict[str, object]] = []
+        for sample_index, (history_timeline, target) in enumerate(raw_samples):
+            history = list(reversed(history_timeline))
+            sample_seed = _stable_int_seed("team-backtest", seed or 0, target.get("period", sample_index))
+            lead_model = train_lead_agent(
+                history,
+                learning_cycles=min(lead_learning_cycles, len(history)),
+                window_sizes=lead_window_sizes,
+                initial_weights=initial_weights,
+                num_trials=4,
+            )
+            expert_teams = build_expert_teams(history, tickets=ticket_count, seed=sample_seed)
+            contexts.append({
+                "history": history,
+                "target": target,
+                "sample_seed": sample_seed,
+                "lead_model": lead_model,
+                "expert_teams": expert_teams,
+            })
+        return contexts
+
+    if context_cache is None:
+        return prepare()
+    key = make_backtest_context_key(records, cycles, seed, initial_weights, ticket_count)
+    return context_cache.get_or_prepare(key, prepare)
+
+
 def team_matrix_backtest_report(
     records: List[Dict],
     cycles: int = 36,
@@ -4379,9 +4435,10 @@ def team_matrix_backtest_report(
     runtime_config: Optional[Dict[str, object]] = None,
     initial_weights: Optional[Dict[str, float]] = None,
     progress_callback=None,
+    context_cache: Optional[BacktestContextCache] = None,
 ) -> Dict[str, object]:
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
-    samples = list(iterate_archived_cycles(records, cycles=cycles))
+    samples = _prepare_team_backtest_contexts(records, cycles, seed, initial_weights, context_cache)
     if not samples:
         return {
             "overall": {
@@ -4401,6 +4458,7 @@ def team_matrix_backtest_report(
             "matrix_rows": [],
             "counterfactual": _empty_counterfactual_report(),
             "blue_calibration": _empty_blue_calibration_report(),
+            "context_cache": _context_cache_telemetry(context_cache),
         }
 
     overall = {
@@ -4428,11 +4486,13 @@ def team_matrix_backtest_report(
         "samples": 0, "top1_hits": 0, "top3_hits": 0, "hit_count": 0, "hit_rank_total": 0.0,
     }
     ticket_count_total = 0
-    lead_learning_cycles = max(8, min(12, cycles))
-    lead_window_sizes = (lead_learning_cycles, max(lead_learning_cycles * 2, 24))
 
-    for sample_index, (history_timeline, target) in enumerate(samples):
-        history = list(reversed(history_timeline))
+    for sample_index, context in enumerate(samples):
+        history = context["history"]
+        target = context["target"]
+        sample_seed = int(context["sample_seed"])
+        lead_model = context["lead_model"]
+        expert_teams = context["expert_teams"]
         if progress_callback:
             progress_callback(
                 {
@@ -4442,16 +4502,7 @@ def team_matrix_backtest_report(
                     "history_size": len(history),
                 }
             )
-        sample_seed = _stable_int_seed("team-backtest", seed or 0, target.get("period", sample_index))
-        lead_model = train_lead_agent(
-            history,
-            learning_cycles=min(lead_learning_cycles, len(history)),
-            window_sizes=lead_window_sizes,
-            initial_weights=initial_weights,
-            num_trials=4,
-        )
         diff_factor = 1.0
-        expert_teams = build_expert_teams(history, tickets=resolve_team_ticket_count(TEAM_TICKET_COUNT), seed=sample_seed)
         tickets = generate_final_team_tickets(
             expert_teams,
             lead_model=lead_model,
@@ -4600,6 +4651,7 @@ def team_matrix_backtest_report(
         "matrix_rows": matrix_row_report,
         "counterfactual": _finalize_counterfactual_report(counterfactual_raw),
         "blue_calibration": _finalize_blue_calibration_report(blue_calibration_raw),
+        "context_cache": _context_cache_telemetry(context_cache),
     }
 
 
