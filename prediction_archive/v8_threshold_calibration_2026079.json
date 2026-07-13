@@ -1,0 +1,750 @@
+{
+  "aggregate": {
+    "selected_vs_default_delta": {
+      "ci95_high": 0.0,
+      "ci95_low": 0.0,
+      "max": 0.0,
+      "mean": 0.0,
+      "median": 0.0,
+      "min": 0.0,
+      "q25": 0.0,
+      "q75": 0.0,
+      "samples": 3,
+      "std": 0.0
+    },
+    "selected_vs_legacy_delta": {
+      "ci95_high": 0.031667,
+      "ci95_low": -0.011666,
+      "max": 0.031667,
+      "mean": 0.013334,
+      "median": 0.02,
+      "min": -0.011666,
+      "q25": 0.004167,
+      "q75": 0.025834,
+      "samples": 3,
+      "std": 0.018308
+    },
+    "selection_frequency": [
+      {
+        "count": 2,
+        "ratio": 0.666667,
+        "thresholds": {
+          "min_score_gap": 0.06,
+          "one_score_threshold": 0.42,
+          "two_score_threshold": 0.58
+        }
+      },
+      {
+        "count": 1,
+        "ratio": 0.333333,
+        "thresholds": {
+          "min_score_gap": 0.02,
+          "one_score_threshold": 0.42,
+          "two_score_threshold": 0.58
+        }
+      }
+    ]
+  },
+  "cache": {
+    "entries": 60,
+    "hits": 6,
+    "misses": 60
+  },
+  "candidates": [
+    {
+      "min_score_gap": 0.04,
+      "one_score_threshold": 0.42,
+      "two_score_threshold": 0.58
+    },
+    {
+      "min_score_gap": 0.04,
+      "one_score_threshold": 0.38,
+      "two_score_threshold": 0.58
+    },
+    {
+      "min_score_gap": 0.04,
+      "one_score_threshold": 0.46,
+      "two_score_threshold": 0.58
+    },
+    {
+      "min_score_gap": 0.04,
+      "one_score_threshold": 0.42,
+      "two_score_threshold": 0.54
+    },
+    {
+      "min_score_gap": 0.04,
+      "one_score_threshold": 0.42,
+      "two_score_threshold": 0.62
+    },
+    {
+      "min_score_gap": 0.02,
+      "one_score_threshold": 0.42,
+      "two_score_threshold": 0.58
+    },
+    {
+      "min_score_gap": 0.06,
+      "one_score_threshold": 0.42,
+      "two_score_threshold": 0.58
+    }
+  ],
+  "fold_count_requested": 3,
+  "folds": [
+    {
+      "candidate_ranking": [
+        {
+          "distance_from_default": 0.02,
+          "objective": {
+            "ci95_high": 0.346667,
+            "ci95_low": 0.346667,
+            "max": 0.382778,
+            "mean": 0.346667,
+            "median": 0.346667,
+            "min": 0.310556,
+            "q25": 0.328612,
+            "q75": 0.364723,
+            "samples": 2,
+            "std": 0.036111
+          },
+          "robust_score": 0.328612,
+          "thresholds": {
+            "min_score_gap": 0.02,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.0,
+          "objective": {
+            "ci95_high": 0.344305,
+            "ci95_low": 0.344305,
+            "max": 0.378055,
+            "mean": 0.344305,
+            "median": 0.344305,
+            "min": 0.310556,
+            "q25": 0.327431,
+            "q75": 0.36118,
+            "samples": 2,
+            "std": 0.033749
+          },
+          "robust_score": 0.327431,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.02,
+          "objective": {
+            "ci95_high": 0.344305,
+            "ci95_low": 0.344305,
+            "max": 0.378055,
+            "mean": 0.344305,
+            "median": 0.344305,
+            "min": 0.310556,
+            "q25": 0.327431,
+            "q75": 0.36118,
+            "samples": 2,
+            "std": 0.033749
+          },
+          "robust_score": 0.327431,
+          "thresholds": {
+            "min_score_gap": 0.06,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.344305,
+            "ci95_low": 0.344305,
+            "max": 0.378055,
+            "mean": 0.344305,
+            "median": 0.344305,
+            "min": 0.310556,
+            "q25": 0.327431,
+            "q75": 0.36118,
+            "samples": 2,
+            "std": 0.033749
+          },
+          "robust_score": 0.327431,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.38,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.344305,
+            "ci95_low": 0.344305,
+            "max": 0.378055,
+            "mean": 0.344305,
+            "median": 0.344305,
+            "min": 0.310556,
+            "q25": 0.327431,
+            "q75": 0.36118,
+            "samples": 2,
+            "std": 0.033749
+          },
+          "robust_score": 0.327431,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.46,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.344305,
+            "ci95_low": 0.344305,
+            "max": 0.378055,
+            "mean": 0.344305,
+            "median": 0.344305,
+            "min": 0.310556,
+            "q25": 0.327431,
+            "q75": 0.36118,
+            "samples": 2,
+            "std": 0.033749
+          },
+          "robust_score": 0.327431,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.54
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.344305,
+            "ci95_low": 0.344305,
+            "max": 0.378055,
+            "mean": 0.344305,
+            "median": 0.344305,
+            "min": 0.310556,
+            "q25": 0.327431,
+            "q75": 0.36118,
+            "samples": 2,
+            "std": 0.033749
+          },
+          "robust_score": 0.327431,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.62
+          }
+        }
+      ],
+      "fold": 1,
+      "selected_thresholds": {
+        "min_score_gap": 0.02,
+        "one_score_threshold": 0.42,
+        "two_score_threshold": 0.58
+      },
+      "selected_training_objective": {
+        "ci95_high": 0.346667,
+        "ci95_low": 0.346667,
+        "max": 0.382778,
+        "mean": 0.346667,
+        "median": 0.346667,
+        "min": 0.310556,
+        "q25": 0.328612,
+        "q75": 0.364723,
+        "samples": 2,
+        "std": 0.036111
+      },
+      "selected_vs_default_delta": 0.0,
+      "selected_vs_legacy_delta": 0.02,
+      "train_end_period": "2026043",
+      "train_samples": 36,
+      "validation": {
+        "default_dynamic": {
+          "ci95_high": 0.29125,
+          "ci95_low": 0.29125,
+          "max": 0.3375,
+          "mean": 0.29125,
+          "median": 0.29125,
+          "min": 0.245,
+          "q25": 0.268125,
+          "q75": 0.314375,
+          "samples": 2,
+          "std": 0.04625
+        },
+        "legacy": {
+          "ci95_high": 0.27125,
+          "ci95_low": 0.27125,
+          "max": 0.311667,
+          "mean": 0.27125,
+          "median": 0.27125,
+          "min": 0.230833,
+          "q25": 0.251042,
+          "q75": 0.291459,
+          "samples": 2,
+          "std": 0.040417
+        },
+        "selected": {
+          "ci95_high": 0.29125,
+          "ci95_low": 0.29125,
+          "max": 0.3375,
+          "mean": 0.29125,
+          "median": 0.29125,
+          "min": 0.245,
+          "q25": 0.268125,
+          "q75": 0.314375,
+          "samples": 2,
+          "std": 0.04625
+        }
+      },
+      "validation_end_period": "2026055",
+      "validation_samples": 12,
+      "validation_start_period": "2026044"
+    },
+    {
+      "candidate_ranking": [
+        {
+          "distance_from_default": 0.02,
+          "objective": {
+            "ci95_high": 0.343611,
+            "ci95_low": 0.343611,
+            "max": 0.3475,
+            "mean": 0.343611,
+            "median": 0.343611,
+            "min": 0.339722,
+            "q25": 0.341666,
+            "q75": 0.345556,
+            "samples": 2,
+            "std": 0.003889
+          },
+          "robust_score": 0.341666,
+          "thresholds": {
+            "min_score_gap": 0.06,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.0,
+          "objective": {
+            "ci95_high": 0.339305,
+            "ci95_low": 0.339305,
+            "max": 0.3475,
+            "mean": 0.339305,
+            "median": 0.339305,
+            "min": 0.331111,
+            "q25": 0.335208,
+            "q75": 0.343403,
+            "samples": 2,
+            "std": 0.008194
+          },
+          "robust_score": 0.335208,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.02,
+          "objective": {
+            "ci95_high": 0.339305,
+            "ci95_low": 0.339305,
+            "max": 0.3475,
+            "mean": 0.339305,
+            "median": 0.339305,
+            "min": 0.331111,
+            "q25": 0.335208,
+            "q75": 0.343403,
+            "samples": 2,
+            "std": 0.008194
+          },
+          "robust_score": 0.335208,
+          "thresholds": {
+            "min_score_gap": 0.02,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.339305,
+            "ci95_low": 0.339305,
+            "max": 0.3475,
+            "mean": 0.339305,
+            "median": 0.339305,
+            "min": 0.331111,
+            "q25": 0.335208,
+            "q75": 0.343403,
+            "samples": 2,
+            "std": 0.008194
+          },
+          "robust_score": 0.335208,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.38,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.339305,
+            "ci95_low": 0.339305,
+            "max": 0.3475,
+            "mean": 0.339305,
+            "median": 0.339305,
+            "min": 0.331111,
+            "q25": 0.335208,
+            "q75": 0.343403,
+            "samples": 2,
+            "std": 0.008194
+          },
+          "robust_score": 0.335208,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.46,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.339305,
+            "ci95_low": 0.339305,
+            "max": 0.3475,
+            "mean": 0.339305,
+            "median": 0.339305,
+            "min": 0.331111,
+            "q25": 0.335208,
+            "q75": 0.343403,
+            "samples": 2,
+            "std": 0.008194
+          },
+          "robust_score": 0.335208,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.54
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.339305,
+            "ci95_low": 0.339305,
+            "max": 0.3475,
+            "mean": 0.339305,
+            "median": 0.339305,
+            "min": 0.331111,
+            "q25": 0.335208,
+            "q75": 0.343403,
+            "samples": 2,
+            "std": 0.008194
+          },
+          "robust_score": 0.335208,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.62
+          }
+        }
+      ],
+      "fold": 2,
+      "selected_thresholds": {
+        "min_score_gap": 0.06,
+        "one_score_threshold": 0.42,
+        "two_score_threshold": 0.58
+      },
+      "selected_training_objective": {
+        "ci95_high": 0.343611,
+        "ci95_low": 0.343611,
+        "max": 0.3475,
+        "mean": 0.343611,
+        "median": 0.343611,
+        "min": 0.339722,
+        "q25": 0.341666,
+        "q75": 0.345556,
+        "samples": 2,
+        "std": 0.003889
+      },
+      "selected_vs_default_delta": 0.0,
+      "selected_vs_legacy_delta": -0.011666,
+      "train_end_period": "2026055",
+      "train_samples": 36,
+      "validation": {
+        "default_dynamic": {
+          "ci95_high": 0.29875,
+          "ci95_low": 0.29875,
+          "max": 0.31,
+          "mean": 0.29875,
+          "median": 0.29875,
+          "min": 0.2875,
+          "q25": 0.293125,
+          "q75": 0.304375,
+          "samples": 2,
+          "std": 0.01125
+        },
+        "legacy": {
+          "ci95_high": 0.310416,
+          "ci95_low": 0.310416,
+          "max": 0.333333,
+          "mean": 0.310416,
+          "median": 0.310416,
+          "min": 0.2875,
+          "q25": 0.298958,
+          "q75": 0.321875,
+          "samples": 2,
+          "std": 0.022917
+        },
+        "selected": {
+          "ci95_high": 0.29875,
+          "ci95_low": 0.29875,
+          "max": 0.31,
+          "mean": 0.29875,
+          "median": 0.29875,
+          "min": 0.2875,
+          "q25": 0.293125,
+          "q75": 0.304375,
+          "samples": 2,
+          "std": 0.01125
+        }
+      },
+      "validation_end_period": "2026067",
+      "validation_samples": 12,
+      "validation_start_period": "2026056"
+    },
+    {
+      "candidate_ranking": [
+        {
+          "distance_from_default": 0.02,
+          "objective": {
+            "ci95_high": 0.33,
+            "ci95_low": 0.33,
+            "max": 0.3375,
+            "mean": 0.33,
+            "median": 0.33,
+            "min": 0.3225,
+            "q25": 0.32625,
+            "q75": 0.33375,
+            "samples": 2,
+            "std": 0.0075
+          },
+          "robust_score": 0.32625,
+          "thresholds": {
+            "min_score_gap": 0.06,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.0,
+          "objective": {
+            "ci95_high": 0.325694,
+            "ci95_low": 0.325694,
+            "max": 0.328889,
+            "mean": 0.325694,
+            "median": 0.325694,
+            "min": 0.3225,
+            "q25": 0.324097,
+            "q75": 0.327292,
+            "samples": 2,
+            "std": 0.003194
+          },
+          "robust_score": 0.324097,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.02,
+          "objective": {
+            "ci95_high": 0.325694,
+            "ci95_low": 0.325694,
+            "max": 0.328889,
+            "mean": 0.325694,
+            "median": 0.325694,
+            "min": 0.3225,
+            "q25": 0.324097,
+            "q75": 0.327292,
+            "samples": 2,
+            "std": 0.003194
+          },
+          "robust_score": 0.324097,
+          "thresholds": {
+            "min_score_gap": 0.02,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.325694,
+            "ci95_low": 0.325694,
+            "max": 0.328889,
+            "mean": 0.325694,
+            "median": 0.325694,
+            "min": 0.3225,
+            "q25": 0.324097,
+            "q75": 0.327292,
+            "samples": 2,
+            "std": 0.003194
+          },
+          "robust_score": 0.324097,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.38,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.325694,
+            "ci95_low": 0.325694,
+            "max": 0.328889,
+            "mean": 0.325694,
+            "median": 0.325694,
+            "min": 0.3225,
+            "q25": 0.324097,
+            "q75": 0.327292,
+            "samples": 2,
+            "std": 0.003194
+          },
+          "robust_score": 0.324097,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.46,
+            "two_score_threshold": 0.58
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.325694,
+            "ci95_low": 0.325694,
+            "max": 0.328889,
+            "mean": 0.325694,
+            "median": 0.325694,
+            "min": 0.3225,
+            "q25": 0.324097,
+            "q75": 0.327292,
+            "samples": 2,
+            "std": 0.003194
+          },
+          "robust_score": 0.324097,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.54
+          }
+        },
+        {
+          "distance_from_default": 0.04,
+          "objective": {
+            "ci95_high": 0.325694,
+            "ci95_low": 0.325694,
+            "max": 0.328889,
+            "mean": 0.325694,
+            "median": 0.325694,
+            "min": 0.3225,
+            "q25": 0.324097,
+            "q75": 0.327292,
+            "samples": 2,
+            "std": 0.003194
+          },
+          "robust_score": 0.324097,
+          "thresholds": {
+            "min_score_gap": 0.04,
+            "one_score_threshold": 0.42,
+            "two_score_threshold": 0.62
+          }
+        }
+      ],
+      "fold": 3,
+      "selected_thresholds": {
+        "min_score_gap": 0.06,
+        "one_score_threshold": 0.42,
+        "two_score_threshold": 0.58
+      },
+      "selected_training_objective": {
+        "ci95_high": 0.33,
+        "ci95_low": 0.33,
+        "max": 0.3375,
+        "mean": 0.33,
+        "median": 0.33,
+        "min": 0.3225,
+        "q25": 0.32625,
+        "q75": 0.33375,
+        "samples": 2,
+        "std": 0.0075
+      },
+      "selected_vs_default_delta": 0.0,
+      "selected_vs_legacy_delta": 0.031667,
+      "train_end_period": "2026067",
+      "train_samples": 36,
+      "validation": {
+        "default_dynamic": {
+          "ci95_high": 0.336667,
+          "ci95_low": 0.336667,
+          "max": 0.345,
+          "mean": 0.336667,
+          "median": 0.336667,
+          "min": 0.328334,
+          "q25": 0.3325,
+          "q75": 0.340834,
+          "samples": 2,
+          "std": 0.008333
+        },
+        "legacy": {
+          "ci95_high": 0.305,
+          "ci95_low": 0.305,
+          "max": 0.373333,
+          "mean": 0.305,
+          "median": 0.305,
+          "min": 0.236667,
+          "q25": 0.270834,
+          "q75": 0.339166,
+          "samples": 2,
+          "std": 0.068333
+        },
+        "selected": {
+          "ci95_high": 0.336667,
+          "ci95_low": 0.336667,
+          "max": 0.345,
+          "mean": 0.336667,
+          "median": 0.336667,
+          "min": 0.328334,
+          "q25": 0.3325,
+          "q75": 0.340834,
+          "samples": 2,
+          "std": 0.008333
+        }
+      },
+      "validation_end_period": "2026079",
+      "validation_samples": 12,
+      "validation_start_period": "2026068"
+    }
+  ],
+  "generated_at": "2026-07-14T03:22:56",
+  "grid_mode": "one_factor",
+  "guardrails": {
+    "expanding_window": true,
+    "future_data_in_training": false,
+    "no_archive_write": true,
+    "objective_is_comparison_only": true
+  },
+  "report_schema_version": "threshold-calibration/v1",
+  "seeds": [
+    7,
+    42
+  ],
+  "train_cycles": 36,
+  "validation_cycles": 12
+}
