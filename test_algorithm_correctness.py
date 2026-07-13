@@ -201,5 +201,42 @@ class AlgorithmCorrectnessTests(unittest.TestCase):
         self.assertEqual(len(set(mixed) & set(range(23, 34))), 2)
 
 
+    def test_four_red_one_blue_metric_requires_same_ticket(self):
+        summary = predict._empty_multi_ticket_backtest_summary()
+        target = {"red_balls": [1, 2, 3, 4, 5, 6], "blue_ball": 16}
+        tickets = [
+            {"red": [1, 2, 3, 4, 20, 21], "blue": 1},
+            {"red": [1, 2, 3, 20, 21, 22], "blue": 16},
+        ]
+
+        predict._accumulate_multi_ticket_backtest(summary, tickets, target)
+        result = predict._finalize_multi_ticket_backtest(summary)
+
+        self.assertEqual(result["best_of_5_hit_count_4plus1"], 0)
+        self.assertEqual(result["best_of_5_hit_rate_4plus1"], 0.0)
+        self.assertEqual(result["best_of_5_hit_rate_ge4_plus_blue"], 0.0)
+
+    def test_four_red_one_blue_metric_counts_exact_and_higher_joint_hits(self):
+        summary = predict._empty_multi_ticket_backtest_summary()
+        target = {"red_balls": [1, 2, 3, 4, 5, 6], "blue_ball": 16}
+
+        predict._accumulate_multi_ticket_backtest(
+            summary,
+            [{"red": [1, 2, 3, 4, 20, 21], "blue": 16}],
+            target,
+        )
+        predict._accumulate_multi_ticket_backtest(
+            summary,
+            [{"red": [1, 2, 3, 4, 5, 21], "blue": 16}],
+            target,
+        )
+        result = predict._finalize_multi_ticket_backtest(summary)
+
+        self.assertEqual(result["best_of_5_hit_count_4plus1"], 1)
+        self.assertEqual(result["best_of_5_hit_rate_4plus1"], 0.5)
+        self.assertEqual(result["best_of_5_hit_count_ge4_plus_blue"], 2)
+        self.assertEqual(result["best_of_5_hit_rate_ge4_plus_blue"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

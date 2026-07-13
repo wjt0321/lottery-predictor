@@ -51,6 +51,8 @@ BACKTEST_UPLIFT_METRICS = (
     "best_of_5_avg_score",
     "best_of_5_hit_rate_ge2",
     "best_of_5_hit_rate_ge3",
+    "best_of_5_hit_rate_4plus1",
+    "best_of_5_hit_rate_ge4_plus_blue",
     "blue_pool_hit_rate",
     "final_blue_hit_rate",
     "avg_overlap",
@@ -2728,6 +2730,10 @@ def _empty_multi_ticket_backtest_summary() -> Dict[str, float]:
         "best_of_5_hit_rate_ge4": 0.0,
         "best_of_5_hit_rate_ge5": 0.0,
         "best_of_5_hit_rate_ge6": 0.0,
+        "best_of_5_hit_count_4plus1": 0,
+        "best_of_5_hit_rate_4plus1": 0.0,
+        "best_of_5_hit_count_ge4_plus_blue": 0,
+        "best_of_5_hit_rate_ge4_plus_blue": 0.0,
         "blue_pool_hit_rate": 0.0,
         "final_blue_hit_rate": 0.0,
         "avg_overlap": 0.0,
@@ -2739,6 +2745,8 @@ def _empty_multi_ticket_backtest_summary() -> Dict[str, float]:
         "_best_of_5_hit_rate_ge4_total": 0.0,
         "_best_of_5_hit_rate_ge5_total": 0.0,
         "_best_of_5_hit_rate_ge6_total": 0.0,
+        "_best_of_5_hit_count_4plus1_total": 0.0,
+        "_best_of_5_hit_count_ge4_plus_blue_total": 0.0,
         "_blue_pool_hit_rate_total": 0.0,
         "_final_blue_hit_rate_total": 0.0,
         "_avg_overlap_total": 0.0,
@@ -2794,6 +2802,8 @@ def _accumulate_multi_ticket_backtest(
     ticket_scores: List[float] = []
     red_hit_counts: List[int] = []
     blue_hit_any = False
+    exact_4plus1_any = False
+    ge4_plus_blue_any = False
     for ticket in tickets:
         red_hits = len(set(ticket.get("red", [])) & set(target.get("red_balls", [])))
         blue_hit = 1 if int(ticket.get("blue", 0) or 0) == int(target.get("blue_ball", 0) or 0) else 0
@@ -2801,6 +2811,8 @@ def _accumulate_multi_ticket_backtest(
         ticket_scores.append(score)
         red_hit_counts.append(red_hits)
         blue_hit_any = blue_hit_any or bool(blue_hit)
+        exact_4plus1_any = exact_4plus1_any or (red_hits == 4 and bool(blue_hit))
+        ge4_plus_blue_any = ge4_plus_blue_any or (red_hits >= 4 and bool(blue_hit))
     blue_pool = _extract_blue_pool_from_tickets(tickets, fallback_blue_pool=fallback_blue_pool)
     summary["_ticket_count_total"] += len(ticket_scores)
     summary["_avg_ticket_score_total"] += sum(ticket_scores)
@@ -2811,6 +2823,8 @@ def _accumulate_multi_ticket_backtest(
     summary["_best_of_5_hit_rate_ge4_total"] += 1.0 if max_hits >= 4 else 0.0
     summary["_best_of_5_hit_rate_ge5_total"] += 1.0 if max_hits >= 5 else 0.0
     summary["_best_of_5_hit_rate_ge6_total"] += 1.0 if max_hits >= 6 else 0.0
+    summary["_best_of_5_hit_count_4plus1_total"] += 1.0 if exact_4plus1_any else 0.0
+    summary["_best_of_5_hit_count_ge4_plus_blue_total"] += 1.0 if ge4_plus_blue_any else 0.0
     summary["_blue_pool_hit_rate_total"] += 1.0 if int(target.get("blue_ball", 0) or 0) in blue_pool else 0.0
     summary["_final_blue_hit_rate_total"] += 1.0 if blue_hit_any else 0.0
     summary["_avg_overlap_total"] += _average_ticket_overlap(tickets)
@@ -2828,6 +2842,10 @@ def _finalize_multi_ticket_backtest(summary: Dict[str, float]) -> Dict[str, obje
             "best_of_5_hit_rate_ge4": 0.0,
             "best_of_5_hit_rate_ge5": 0.0,
             "best_of_5_hit_rate_ge6": 0.0,
+            "best_of_5_hit_count_4plus1": 0,
+            "best_of_5_hit_rate_4plus1": 0.0,
+            "best_of_5_hit_count_ge4_plus_blue": 0,
+            "best_of_5_hit_rate_ge4_plus_blue": 0.0,
             "blue_pool_hit_rate": 0.0,
             "final_blue_hit_rate": 0.0,
             "avg_overlap": 0.0,
@@ -2843,6 +2861,10 @@ def _finalize_multi_ticket_backtest(summary: Dict[str, float]) -> Dict[str, obje
         "best_of_5_hit_rate_ge4": round(float(summary.get("_best_of_5_hit_rate_ge4_total", 0.0)) / sample_total, 6),
         "best_of_5_hit_rate_ge5": round(float(summary.get("_best_of_5_hit_rate_ge5_total", 0.0)) / sample_total, 6),
         "best_of_5_hit_rate_ge6": round(float(summary.get("_best_of_5_hit_rate_ge6_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_count_4plus1": int(summary.get("_best_of_5_hit_count_4plus1_total", 0.0)),
+        "best_of_5_hit_rate_4plus1": round(float(summary.get("_best_of_5_hit_count_4plus1_total", 0.0)) / sample_total, 6),
+        "best_of_5_hit_count_ge4_plus_blue": int(summary.get("_best_of_5_hit_count_ge4_plus_blue_total", 0.0)),
+        "best_of_5_hit_rate_ge4_plus_blue": round(float(summary.get("_best_of_5_hit_count_ge4_plus_blue_total", 0.0)) / sample_total, 6),
         "blue_pool_hit_rate": round(float(summary.get("_blue_pool_hit_rate_total", 0.0)) / sample_total, 6),
         "final_blue_hit_rate": round(float(summary.get("_final_blue_hit_rate_total", 0.0)) / sample_total, 6),
         "avg_overlap": round(float(summary.get("_avg_overlap_total", 0.0)) / sample_total, 6),
@@ -3162,6 +3184,10 @@ def team_matrix_backtest_report(
                 "best_of_5_avg_score": 0.0,
                 "best_of_5_hit_rate_ge2": 0.0,
                 "best_of_5_hit_rate_ge3": 0.0,
+                "best_of_5_hit_count_4plus1": 0,
+                "best_of_5_hit_rate_4plus1": 0.0,
+                "best_of_5_hit_count_ge4_plus_blue": 0,
+                "best_of_5_hit_rate_ge4_plus_blue": 0.0,
                 "blue_pool_hit_rate": 0.0,
                 "final_blue_hit_rate": 0.0,
             },
@@ -3177,6 +3203,10 @@ def team_matrix_backtest_report(
         "best_of_5_hit_rate_ge4": 0.0,
         "best_of_5_hit_rate_ge5": 0.0,
         "best_of_5_hit_rate_ge6": 0.0,
+        "best_of_5_hit_count_4plus1": 0,
+        "best_of_5_hit_rate_4plus1": 0.0,
+        "best_of_5_hit_count_ge4_plus_blue": 0,
+        "best_of_5_hit_rate_ge4_plus_blue": 0.0,
         "blue_pool_hit_rate": 0.0,
         "final_blue_hit_rate": 0.0,
     }
@@ -3220,6 +3250,8 @@ def team_matrix_backtest_report(
         ticket_scores = []
         red_hit_counts = []
         blue_hit_any = False
+        exact_4plus1_any = False
+        ge4_plus_blue_any = False
         blue_pool_hit = False
 
         for ticket in tickets:
@@ -3229,6 +3261,8 @@ def team_matrix_backtest_report(
             ticket_scores.append(score)
             red_hit_counts.append(red_hits)
             blue_hit_any = blue_hit_any or bool(blue_hit)
+            exact_4plus1_any = exact_4plus1_any or (red_hits == 4 and bool(blue_hit))
+            ge4_plus_blue_any = ge4_plus_blue_any or (red_hits >= 4 and bool(blue_hit))
             ticket_count_total += 1
 
             explain_json = ticket.get("explain_json") or {}
@@ -3253,6 +3287,8 @@ def team_matrix_backtest_report(
         overall["best_of_5_hit_rate_ge4"] += 1.0 if max_hits >= 4 else 0.0
         overall["best_of_5_hit_rate_ge5"] += 1.0 if max_hits >= 5 else 0.0
         overall["best_of_5_hit_rate_ge6"] += 1.0 if max_hits >= 6 else 0.0
+        overall["best_of_5_hit_count_4plus1"] += 1 if exact_4plus1_any else 0
+        overall["best_of_5_hit_count_ge4_plus_blue"] += 1 if ge4_plus_blue_any else 0
         overall["blue_pool_hit_rate"] += 1.0 if blue_pool_hit else 0.0
         overall["final_blue_hit_rate"] += 1.0 if blue_hit_any else 0.0
 
@@ -3264,6 +3300,8 @@ def team_matrix_backtest_report(
     overall["best_of_5_hit_rate_ge4"] = round(overall["best_of_5_hit_rate_ge4"] / sample_count, 6)
     overall["best_of_5_hit_rate_ge5"] = round(overall["best_of_5_hit_rate_ge5"] / sample_count, 6)
     overall["best_of_5_hit_rate_ge6"] = round(overall["best_of_5_hit_rate_ge6"] / sample_count, 6)
+    overall["best_of_5_hit_rate_4plus1"] = round(overall["best_of_5_hit_count_4plus1"] / sample_count, 6)
+    overall["best_of_5_hit_rate_ge4_plus_blue"] = round(overall["best_of_5_hit_count_ge4_plus_blue"] / sample_count, 6)
     overall["blue_pool_hit_rate"] = round(overall["blue_pool_hit_rate"] / sample_count, 6)
     overall["final_blue_hit_rate"] = round(overall["final_blue_hit_rate"] / sample_count, 6)
 
@@ -3635,6 +3673,8 @@ def main():
             print(
                 f"    红2+率 {float(section.get('best_of_5_hit_rate_ge2', 0.0)):.2%} | "
                 f"红3+率 {float(section.get('best_of_5_hit_rate_ge3', 0.0)):.2%} | "
+                f"4红+1蓝 {int(section.get('best_of_5_hit_count_4plus1', 0))} 次/"
+                f"{float(section.get('best_of_5_hit_rate_4plus1', 0.0)):.2%} | "
                 f"蓝球池命中率 {float(section.get('blue_pool_hit_rate', 0.0)):.2%} | "
                 f"最终蓝球命中率 {float(section.get('final_blue_hit_rate', 0.0)):.2%} | "
                 f"平均重叠度 {float(section.get('avg_overlap', 0.0)):.3f}"
@@ -3651,6 +3691,7 @@ def main():
                 f"best-of-5 平均分 {float(uplift.get('best_of_5_avg_score', 0.0)):+.3f} | "
                 f"红2+率 {float(uplift.get('best_of_5_hit_rate_ge2', 0.0)):+.2%} | "
                 f"红3+率 {float(uplift.get('best_of_5_hit_rate_ge3', 0.0)):+.2%} | "
+                f"4红+1蓝率 {float(uplift.get('best_of_5_hit_rate_4plus1', 0.0)):+.2%} | "
                 f"蓝球池命中率 {float(uplift.get('blue_pool_hit_rate', 0.0)):+.2%} | "
                 f"最终蓝球命中率 {float(uplift.get('final_blue_hit_rate', 0.0)):+.2%} | "
                 f"平均重叠度改善 {float(uplift.get('avg_overlap', 0.0)):+.3f}"
@@ -3708,6 +3749,12 @@ def main():
             f"  - best-of-5 红5+率 {overall.get('best_of_5_hit_rate_ge5', 0):.2%} | "
             f"红6率 {overall.get('best_of_5_hit_rate_ge6', 0):.2%} | "
             f"蓝球池命中率 {overall['blue_pool_hit_rate']:.2%}"
+        )
+        print(
+            f"  - 4红+1蓝（同一注）{int(overall.get('best_of_5_hit_count_4plus1', 0))} 次 / "
+            f"{overall.get('best_of_5_hit_rate_4plus1', 0):.2%} | "
+            f"至少4红+蓝 {int(overall.get('best_of_5_hit_count_ge4_plus_blue', 0))} 次 / "
+            f"{overall.get('best_of_5_hit_rate_ge4_plus_blue', 0):.2%}"
         )
         print(
             f"  - 最终5注蓝球命中率 {overall['final_blue_hit_rate']:.2%}"

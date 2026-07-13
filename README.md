@@ -293,6 +293,7 @@ python predict.py --mode team-cover --num 5 --learn-cycles 24 --seed 42
 - 单注平均分
 - best-of-5 平均分
 - 红 `2+` / 红 `3+` 命中率
+- `4红+1蓝` 同注命中次数与命中率（另保留“至少4红+蓝”扩展指标）
 - 蓝球池命中率 / 最终蓝球命中率
 - 组合平均重叠度
 - 相对条件随机基准的 uplift

@@ -602,6 +602,10 @@ class PredictFlowTests(unittest.TestCase):
             "best_of_5_avg_score",
             "best_of_5_hit_rate_ge2",
             "best_of_5_hit_rate_ge3",
+            "best_of_5_hit_count_4plus1",
+            "best_of_5_hit_rate_4plus1",
+            "best_of_5_hit_count_ge4_plus_blue",
+            "best_of_5_hit_rate_ge4_plus_blue",
             "blue_pool_hit_rate",
             "final_blue_hit_rate",
             "avg_overlap",
@@ -693,6 +697,7 @@ class PredictFlowTests(unittest.TestCase):
         self.assertIn("team-cover 对照回测", output)
         self.assertIn("实验模式", output)
         self.assertIn("条件随机基准", output)
+        self.assertIn("4红+1蓝", output)
         self.assertNotIn("未实现", output)
 
     def test_main_team_cover_mode_outputs_tickets_and_archives_prediction(self):
@@ -1147,6 +1152,10 @@ class PredictFlowTests(unittest.TestCase):
         self.assertIn("avg_ticket_score", report["overall"])
         self.assertIn("best_of_5_avg_score", report["overall"])
         self.assertIn("best_of_5_hit_rate_ge2", report["overall"])
+        self.assertIn("best_of_5_hit_count_4plus1", report["overall"])
+        self.assertIn("best_of_5_hit_rate_4plus1", report["overall"])
+        self.assertIn("best_of_5_hit_count_ge4_plus_blue", report["overall"])
+        self.assertIn("best_of_5_hit_rate_ge4_plus_blue", report["overall"])
         self.assertIn("blue_pool_hit_rate", report["overall"])
         self.assertIn("final_blue_hit_rate", report["overall"])
 
