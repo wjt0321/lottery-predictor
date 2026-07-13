@@ -228,30 +228,31 @@ def compute_feature_importance(records: List[Dict], min_periods: int = 50) -> Li
     target_hit_scores: List[float] = []
     target_hot_overlap: List[float] = []
     
-    # 可用的分析期数范围（留至少一期作为目标）
-    max_idx = len(records) - 1
-    
-    for idx in range(max_idx):
-        features = extract_features_for_period(records, idx)
+    # records 从新到旧。对每个目标期，只允许使用它之后（更旧）的记录，
+    # 形成严格的 walk-forward 样本，避免把目标期或未来期放进特征窗口。
+    sample_count = len(records) - min_periods
+
+    for target_idx in range(sample_count):
+        target_record = records[target_idx]
+        history = records[target_idx + 1:]
+        features = extract_features_for_period(history, 0)
         if not features:
             continue
-        
-        # 目标：下一期的中奖号码
-        next_record = records[idx + 1]
-        next_red = set(next_record['red_balls'])
-        
-        # 目标变量 1：与当前期红球的重合数（模拟命中数）
-        current_red = set(records[idx]['red_balls'])
-        hit_score = len(current_red & next_red)
+
+        target_red = set(target_record['red_balls'])
+
+        # 目标变量 1：最近已知一期号码对目标期的重合数。
+        latest_known_red = set(history[0]['red_balls'])
+        hit_score = len(latest_known_red & target_red)
         target_hit_scores.append(float(hit_score))
-        
-        # 目标变量 2：与热号集合的重合数
-        window_20 = records[idx:idx + 20] if idx + 20 <= len(records) else records[idx:]
+
+        # 目标变量 2：仅用目标期之前的 20 期构造热号集合。
+        window_20 = history[:20]
         red_freq = Counter()
         for r in window_20:
             red_freq.update(r['red_balls'])
-        hot_numbers = set(num for num, freq in red_freq.most_common(10))
-        hot_overlap = len(hot_numbers & next_red)
+        hot_numbers = {num for num, _ in red_freq.most_common(10)}
+        hot_overlap = len(hot_numbers & target_red)
         target_hot_overlap.append(float(hot_overlap))
         
         # 收集特征

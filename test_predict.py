@@ -671,7 +671,7 @@ class PredictFlowTests(unittest.TestCase):
             "conditional_random": {"samples": 12, "avg_ticket_score": 1.0},
             "comparison": {"team_cover_vs_random_uplift": {"avg_ticket_score": 0.5}},
         }
-        with mock.patch.object(sys, "argv", ["predict.py", "--team-cover-backtest", "--backtest-cycles", "12", "--seed", "42"]), \
+        with mock.patch.object(sys, "argv", ["predict.py", "--team-cover-backtest", "--backtest-use-current-patches", "--backtest-cycles", "12", "--seed", "42"]), \
              mock.patch.object(predict, "load_data", return_value=data), \
              mock.patch.object(predict, "is_data_stale", return_value=(False, {})), \
              mock.patch.object(predict, "analyze_hot_cold", return_value={"hot_red": list(range(1, 11)), "cold_red": list(range(24, 34))}), \

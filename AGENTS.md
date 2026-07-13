@@ -75,7 +75,7 @@ Backtest entry points: `_run_team_backtest()` / `_run_team_cover_backtest()`
 `project_config.py::ProjectConfig` — single source of truth:
 
 - **Pool**: `core_red_pool_size=22`, `core_blue_pool_size=10`, `rotation_matrix_type="22_red_cover_6_to_5"`
-- **Ticketing**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`
+- **Ticketing**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`
 - **Debate**: `debate_factor=0.6`, controls anti-consensus debate influence strength
 - **Learning**: `learning_rate=0.25`, `decay_gamma=0.85`, `default_learn_cycles=30`
 - **Blue ball**: all `blue_*` params flow via `to_runtime_config()["blue_params"]` → `BlueBallEngine`
@@ -124,6 +124,7 @@ Missing patch files do not block prediction — system falls back gracefully.
 - `row_weights` affects default matrix row order; current semantics are dynamic ordering, not dynamic elimination
 - `--team-backtest` prints progress and reports final 5-ticket metrics
 - `--team-cover-backtest` prints three-way comparison metrics for `team_cover`, `team`, and `conditional_random`, and does not write archives
+- Backtests default to clean runtime config and no archive-derived weight prior; `--backtest-use-current-patches` is an explicit offline sensitivity experiment
 
 ## Hard Constraints
 
@@ -145,6 +146,8 @@ python predict.py --mode team-cover --num 5 --seed 42
 # Backtests
 python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
+# Offline sensitivity experiment only:
+python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 
 # Archive analysis
 python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report

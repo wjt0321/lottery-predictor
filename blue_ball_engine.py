@@ -66,10 +66,12 @@ class BlueBallEngine:
             if miss >= self.missing_extreme_threshold:
                 scores[num] = self.missing_extreme_bonus
             elif miss >= self.missing_cold_threshold:
-                # 线性插值：20期开始加权，越冷越高
-                ratio = min(1.0, (miss - self.missing_cold_threshold) /
-                           (self.missing_extreme_threshold - self.missing_cold_threshold))
-                scores[num] = 1.0 + ratio * (self.missing_extreme_bonus - 1.0)
+                # 从冷号阈值奖励平滑过渡到极冷奖励。
+                span = max(1, self.missing_extreme_threshold - self.missing_cold_threshold)
+                ratio = min(1.0, (miss - self.missing_cold_threshold) / span)
+                scores[num] = self.missing_cold_bonus + ratio * (
+                    self.missing_extreme_bonus - self.missing_cold_bonus
+                )
             elif miss <= 3:
                 scores[num] = 0.8  # 刚出过，略微降权
             else:
@@ -101,20 +103,16 @@ class BlueBallEngine:
         next_odd_prob = 0.5 + reversion * 0.4
         next_odd_prob = max(0.3, min(0.7, next_odd_prob))
 
-        # 奇偶连续数检测
-        parity_runs = []
-        run = 1
+        # 只检测从最新一期开始的当前连续段。历史上的长连续段不应
+        # 被误当成正在发生的连续段，否则会把反转信号施加到错误方向。
+        current_run = 1
         for i in range(1, min(15, len(parity_seq))):
-            if parity_seq[i] == parity_seq[i - 1]:
-                run += 1
-            else:
-                parity_runs.append(run)
-                run = 1
-        parity_runs.append(run)
-        max_run = max(parity_runs) if parity_runs else 1
+            if parity_seq[i] != parity_seq[0]:
+                break
+            current_run += 1
 
-        # 连续同奇偶超过 4 期 → 加大反转概率
-        if max_run >= 4:
+        # 当前连续同奇偶超过 4 期 → 加大反转概率
+        if current_run >= 4:
             last_parity = parity_seq[0]
             if last_parity == 1:
                 next_odd_prob = max(0.1, next_odd_prob - 0.15)
@@ -142,11 +140,13 @@ class BlueBallEngine:
         recent = self.records[:self.zone_window]
         blues = [r['blue_ball'] for r in recent]
         zone_seq = [blue_zone(b) for b in blues]
+        chronological_zones = list(reversed(zone_seq))
 
-        # 构建转移矩阵
+        # 构建从旧期到新期的转移矩阵。输入 records 是从新到旧，
+        # 若不反转会学习到完全相反的条件转移方向。
         zone_trans = [[1, 1, 1], [1, 1, 1], [1, 1, 1]]
-        for i in range(1, len(zone_seq)):
-            zone_trans[zone_seq[i - 1]][zone_seq[i]] += 1
+        for i in range(1, len(chronological_zones)):
+            zone_trans[chronological_zones[i - 1]][chronological_zones[i]] += 1
 
         # 拉普拉斯平滑归一化
         for z in range(3):
@@ -160,12 +160,6 @@ class BlueBallEngine:
         # 返回每个蓝球对应区间的概率
         result = {}
         for num in self.blue_range:
-            zone = blue_zone(num)
-            # 基础概率 = 转移概率，同时考虑各区的静态分布
-            zone_priors = [0.33, 0.33, 0.34]
-            zone_count = Counter(zone_seq)
-            for z in range(3):
-                zone_priors[z] = zone_count.get(z, 0) / len(zone_seq)
             result[num] = (
                 next_zone_probs[0],
                 next_zone_probs[1],

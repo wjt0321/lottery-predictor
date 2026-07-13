@@ -82,7 +82,7 @@ main() → run_team_mode()
 `project_config.py::ProjectConfig` 是唯一配置来源，关键默认值：
 
 - **核心池**: `core_red_pool_size=22`, `core_blue_pool_size=10`, `rotation_matrix_type=”22_red_cover_6_to_5”`
-- **出票**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`
+- **出票**: `team_ticket_count=5`, `ticket_decay_step=0.06`, `min_ticket_decay=0.55`, `anti_ticket_red_count=2`
 - **辩论**: `debate_factor=0.6`，控制反共识辩论影响力（越高反共识球越容易晋升）
 - **学习**: `learning_rate=0.25`, `decay_gamma=0.85`, `default_learn_cycles=30`
 - **蓝球**: 全部 `blue_*` 参数通过 `to_runtime_config()[“blue_params”]` 传入 `BlueBallEngine`
@@ -158,6 +158,8 @@ python predict.py --mode team-cover --num 5 --seed 42
 # 回测
 python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
+# Offline sensitivity experiment only:
+python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 
 # 归档分析
 python analyze_archive.py --archive-dir prediction_archive --export-prefix prediction_archive/analysis_report

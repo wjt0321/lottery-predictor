@@ -145,9 +145,38 @@ def collect_explain_json_records(
 
 
 def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    score_by_agent = defaultdict(float)
+    credit_by_agent = defaultdict(float)
+    exposure_by_agent = defaultdict(float)
+    legacy_score_by_agent = defaultdict(float)
     source_count = Counter()
     total_tickets = 0
+
+    def add_contributions(contribs: object, success: bool, evaluated: bool) -> None:
+        if not isinstance(contribs, dict):
+            return
+        cleaned = {}
+        for agent, value in contribs.items():
+            if not _is_valid_agent(agent):
+                continue
+            try:
+                cleaned[str(agent)] = max(float(value), 0.0)
+            except Exception:
+                continue
+        if not cleaned:
+            return
+        if not evaluated:
+            for agent, value in cleaned.items():
+                legacy_score_by_agent[agent] += value
+            return
+        total = sum(cleaned.values())
+        shares = (
+            {agent: value / total for agent, value in cleaned.items()}
+            if total > 0 else {agent: 1.0 / len(cleaned) for agent in cleaned}
+        )
+        for agent, share in shares.items():
+            exposure_by_agent[agent] += share
+            if success:
+                credit_by_agent[agent] += share
 
     for row in records:
         payload = row.get("payload", {})
@@ -157,51 +186,43 @@ def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, obje
         for agent in payload.get("sources", []) or []:
             if _is_valid_agent(agent):
                 source_count[str(agent)] += 1
-                score_by_agent.setdefault(str(agent), 0.0)
+                credit_by_agent.setdefault(str(agent), 0.0)
+                exposure_by_agent.setdefault(str(agent), 0.0)
+                legacy_score_by_agent.setdefault(str(agent), 0.0)
+
         actual_result = payload.get("actual_result", {}) or {}
         actual_red = set(actual_result.get("actual_red_balls", []) or []) if isinstance(actual_result, dict) else set()
         actual_blue = actual_result.get("actual_blue_ball") if isinstance(actual_result, dict) else None
-        has_actual_balls = bool(actual_red) and actual_blue is not None
+        evaluated = bool(actual_red) and actual_blue is not None
+
         for red in payload.get("red", []) or []:
             if not isinstance(red, dict):
                 continue
-            if has_actual_balls and int(red.get("ball", 0)) not in actual_red:
-                continue
-            contribs = red.get("agent_contributions", {}) or {}
-            if isinstance(contribs, dict):
-                for agent, val in contribs.items():
-                    if not _is_valid_agent(agent):
-                        continue
-                    try:
-                        score_by_agent[str(agent)] += float(val)
-                    except Exception:
-                        continue
-        blue = payload.get("blue", {}) or {}
-        if isinstance(blue, dict):
-            if has_actual_balls and int(blue.get("ball", 0)) != int(actual_blue):
-                continue
-            contribs = blue.get("agent_contributions", {}) or {}
-            if isinstance(contribs, dict):
-                for agent, val in contribs.items():
-                    if not _is_valid_agent(agent):
-                        continue
-                    try:
-                        score_by_agent[str(agent)] += float(val)
-                    except Exception:
-                        continue
+            ball = int(red.get("ball", 0))
+            add_contributions(red.get("agent_contributions", {}), ball in actual_red, evaluated)
 
+        blue = payload.get("blue", {}) or {}
+        if isinstance(blue, dict) and blue:
+            ball = int(blue.get("ball", 0))
+            add_contributions(blue.get("agent_contributions", {}), evaluated and ball == int(actual_blue), evaluated)
+
+    agents = set(credit_by_agent) | set(exposure_by_agent) | set(legacy_score_by_agent) | set(source_count)
     ranking = []
-    for agent, score in score_by_agent.items():
-        ranking.append(
-            {
-                "agent": agent,
-                "score": round(score, 6),
-                "source_share": round(source_count.get(agent, 0) / total_tickets, 4) if total_tickets else 0.0,
-                "source_count": int(source_count.get(agent, 0)),
-            }
-        )
-    ranking.sort(key=lambda r: r["score"], reverse=True)
+    for agent in agents:
+        exposure = float(exposure_by_agent.get(agent, 0.0))
+        credit = float(credit_by_agent.get(agent, 0.0))
+        score = credit / exposure if exposure > 0 else float(legacy_score_by_agent.get(agent, 0.0))
+        ranking.append({
+            "agent": agent,
+            "score": round(score, 6),
+            "credit": round(credit, 6),
+            "exposure": round(exposure, 6),
+            "source_share": round(source_count.get(agent, 0) / total_tickets, 4) if total_tickets else 0.0,
+            "source_count": int(source_count.get(agent, 0)),
+        })
+    ranking.sort(key=lambda row: (row["score"], row["exposure"]), reverse=True)
     return ranking
+
 
 
 def build_matrix_row_ranking(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -497,7 +518,8 @@ def build_param_patch_payload(records: List[Dict[str, object]], matrix_ranking: 
         "fusion_params": {
             "ticket_decay_step": 0.06,
             "min_ticket_decay": 0.55,
-            "debate_factor": 0.9,
+            "debate_factor": GLOBAL_CONFIG.debate_factor,
+            "anti_ticket_red_count": GLOBAL_CONFIG.anti_ticket_red_count,
             "diversity_trigger_rate": round(diversity_rate, 6),
         },
         "matrix_params": {

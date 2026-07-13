@@ -81,9 +81,9 @@ assert len(pool["blue_pool"]) >= 4, f'FAIL: blue pool too small ({len(pool["blue
 print('PASS: Pool sizes adequate')
 
 # ===========================================================================
-# Test 4: Matrix Ticket Generation with 14-ball pool
+# Test 4: Matrix Ticket Generation with configured core pool
 # ===========================================================================
-print('\n--- Test 4: Matrix Tickets with 14-ball pool ---')
+print('\n--- Test 4: Matrix Tickets with configured core pool ---')
 tickets = generate_team_matrix_tickets(teams, lead_model, diff_factor=1.0, records=records)
 print(f'Tickets generated: {len(tickets)}')
 for i, t in enumerate(tickets):

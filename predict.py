@@ -89,7 +89,7 @@ def analyze_hot_cold(records, recent_periods=None):
     
     return {
         'hot_red': [n for n, c in red_freq[:10]],
-        'cold_red': [n for n, c in red_freq[-10:]],
+        'cold_red': [n for n, _ in reversed(red_freq[-10:])],
         'hot_blue': hot_blue,
         'cold_blue': cold_blue,
         'red_freq': dict(red_freq),
@@ -103,7 +103,8 @@ def analyze_blue_missing(records):
     
     for idx, r in enumerate(records):
         blue = r['blue_ball']
-        last_seen[blue] = idx
+        if last_seen[blue] == -1:
+            last_seen[blue] = idx
     
     blue_missing = {}
     for num in range(1, 17):
@@ -126,7 +127,8 @@ def analyze_missing(records):
     
     for idx, r in enumerate(records):
         for ball in r['red_balls']:
-            last_seen[ball] = idx
+            if last_seen[ball] == -1:
+                last_seen[ball] = idx
     
     # 计算每个号码的遗漏期数（距离上次出现的期数）
     red_missing = {}
@@ -190,7 +192,7 @@ def analyze_trend(records, periods=10):
     }
 
 
-def analyze_positions(records, recent_periods=60):
+def analyze_positions(records, recent_periods=60, min_weight=0.6, max_weight=1.5):
     """位置频率分析：红球按升序排列，6个位置各有统计规律。"""
     if len(records) < recent_periods:
         recent_periods = len(records)
@@ -203,12 +205,15 @@ def analyze_positions(records, recent_periods=60):
         for pos, ball in enumerate(balls):
             pos_freq[pos][ball] += 1
     
+    min_weight = float(min_weight)
+    max_weight = max(float(max_weight), min_weight)
     pos_weights = [{} for _ in range(6)]
     for pos in range(6):
-        max_count = max(pos_freq[pos].values()) or 1
+        max_count = max(pos_freq[pos].values(), default=1) or 1
         for num in range(1, 34):
             freq = pos_freq[pos].get(num, 0)
-            pos_weights[pos][num] = min(2.0, max(0.3, (freq / max_count) * 1.5)) if freq > 0 else 0.5
+            ratio = freq / max_count
+            pos_weights[pos][num] = min_weight + ratio * (max_weight - min_weight)
     
     return {
         'pos_weights': pos_weights,
@@ -220,47 +225,39 @@ def analyze_positions(records, recent_periods=60):
 # ============================================================================
 
 def analyze_cycle(records, max_period=50):
-    """周期性分析：分析号码是否存在周期性规律"""
-    if len(records) < 10:
+    """周期性分析（输入记录按从新到旧排序）。"""
+    recent = records[:max_period]
+    if len(recent) < 10:
         return {'cycle_scores': {}, 'top_cycle': []}
-    
+
     cycle_scores = {}
-    
+
     for number in range(1, 34):
-        # 获取该号码出现的期数索引
-        appearances = [i for i, r in enumerate(records) if number in r['red_balls']]
-        
+        # 索引就是距离最近一期的期数（0 表示刚开出）。
+        appearances = [i for i, r in enumerate(recent) if number in r['red_balls']]
+
         if len(appearances) < 3:
             cycle_scores[number] = 0
             continue
-        
-        # 计算间隔
-        intervals = [appearances[i] - appearances[i-1] for i in range(1, len(appearances))]
-        
-        if not intervals:
+
+        # 相邻出现点的距离与时间方向无关，可直接用于估计历史周期。
+        intervals = [appearances[i] - appearances[i - 1] for i in range(1, len(appearances))]
+        avg_interval = sum(intervals) / len(intervals)
+        if avg_interval <= 0:
             cycle_scores[number] = 0
             continue
-        
-        # 计算间隔的方差（方差越小，周期性越强）
-        avg_interval = sum(intervals) / len(intervals)
-        variance = sum((x - avg_interval) ** 2 for x in intervals) / len(intervals) if len(intervals) > 1 else 0
-        
-        # 周期性得分（间隔越稳定，得分越高）
-        if avg_interval > 0:
-            stability = 1 / (1 + variance / (avg_interval ** 2))
-            
-            # 预测下期出现的概率（基于周期）
-            last_appearance = appearances[-1]
-            expected_next = last_appearance + avg_interval
-            current_idx = len(records)
-            
-            # 距离预期出现时间的接近程度
-            distance = abs(current_idx - expected_next)
-            proximity_score = max(0, 1 - distance / avg_interval) if avg_interval > 0 else 0
-            
-            cycle_scores[number] = stability * proximity_score
-        else:
-            cycle_scores[number] = 0
+
+        variance = (
+            sum((gap - avg_interval) ** 2 for gap in intervals) / len(intervals)
+            if len(intervals) > 1 else 0
+        )
+        stability = 1 / (1 + variance / (avg_interval ** 2))
+
+        # 下一期开奖时，当前遗漏会从 appearances[0] 增加 1。
+        next_gap = appearances[0] + 1
+        distance = abs(next_gap - avg_interval)
+        proximity_score = max(0.0, 1 - distance / avg_interval)
+        cycle_scores[number] = stability * proximity_score
     
     # 按周期性得分排序
     sorted_cycles = sorted(cycle_scores.items(), key=lambda x: x[1], reverse=True)
@@ -395,7 +392,7 @@ def _safe_red_sample(
 
     排名靠前的号码获得更高入选概率，避免候选池内部排名信息丢失。
     """
-    unique_candidates = sorted(set(candidates))
+    unique_candidates = list(dict.fromkeys(candidates))
     if len(unique_candidates) < required:
         remaining = [i for i in range(1, 34) if i not in unique_candidates]
         unique_candidates.extend(rng.sample(remaining, required - len(unique_candidates)))
@@ -497,7 +494,7 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
         candidates = missing_data['high_missing_red']
     elif strategy == 'balanced':
         # 多视角融合：短期热+长期冷+遗漏
-        candidates = list(set(hc_short['hot_red'][:5] + hc_long['cold_red'][:5] + missing_data['high_missing_red'][:5]))
+        candidates = list(dict.fromkeys(hc_short['hot_red'][:5] + hc_long['cold_red'][:5] + missing_data['high_missing_red'][:5]))
     elif strategy == 'cycle':
         cycle_analysis = analyze_cycle(records, max_period=40)
         candidates = cycle_analysis['top_cycle'][:12]
@@ -519,10 +516,10 @@ def generate_prediction(records, strategy='balanced', rng: random.Random = None,
             zone_hot = zone_analysis['zone_hot'][zone]
             need = zone_analysis['target_zones'][zone]
             candidates.extend(zone_hot[:need + 2])
-        candidates = list(set(candidates))
+        candidates = list(dict.fromkeys(candidates))
         if len(candidates) < 10:
             candidates.extend(hc_short['hot_red'][:max(0, 10 - len(candidates))])
-            candidates = sorted(set(candidates))
+            candidates = list(dict.fromkeys(candidates))
     else:  # random
         return sorted(rng.sample(range(1, 34), 6)), rng.randint(1, 16)
 
@@ -709,6 +706,31 @@ def resolve_runtime_config(project_root: Optional[str] = None) -> Dict[str, obje
     runtime = load_param_patch(find_default_param_patch(project_root=project_root))
     matrix_overlay = load_matrix_patch(find_default_matrix_patch(project_root=project_root))
     return _deep_merge_dict(runtime, matrix_overlay)
+
+
+def resolve_backtest_priors(
+    use_current_patches: bool,
+    explicit_weight_patch: Optional[str] = None,
+    project_root: Optional[str] = None,
+) -> Tuple[Dict[str, object], Optional[Dict[str, float]], str]:
+    """Resolve fixed priors for an offline backtest.
+
+    Backtests default to a clean configuration so patches learned from later
+    archived draws cannot leak into earlier samples. Current patches are only
+    loaded when the caller explicitly opts into that offline experiment.
+    """
+    if not use_current_patches:
+        return json.loads(json.dumps(DEFAULT_RUNTIME_CONFIG)), None, "clean"
+
+    patch_path, patch_source = resolve_weight_patch_path(
+        explicit_weight_patch,
+        project_root=project_root,
+    )
+    return (
+        resolve_runtime_config(project_root=project_root),
+        load_weight_patch(patch_path),
+        patch_source,
+    )
 
 
 def _runtime_blue_params(runtime_config: Optional[Dict[str, object]] = None) -> Dict[str, object]:
@@ -2139,75 +2161,100 @@ def _build_blue_debate(
     blue_engine: "BlueBallEngine",
     runtime_config: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
-    """蓝球反共识辩论：检查引擎低分蓝球是否在某个维度有突出表现。
-
-    BlueBallEngine 的 6 个维度各有权重，某些蓝球可能总分低但
-    在某个维度特别突出（如遗漏极值、奇偶强信号）。辩论回合
-    让这些"偏科"蓝球有机会进入候选池。
-
-    Returns:
-        更新后的 snapshot（blue_pool 可能变化）
-    """
+    """Promote low-consensus blue balls with a standout engine dimension."""
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
-    core_blue_pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", 10))
-
-    blue_scores = snapshot.get("blue_scores", {})
-    if not blue_scores:
+    pool_size = int(runtime.get("pool_params", {}).get("core_blue_pool_size", 10))
+    full_scores = snapshot.get("blue_scores_full", {}) or snapshot.get("blue_scores", {})
+    full_scores = {int(ball): float(score) for ball, score in full_scores.items()}
+    if not full_scores:
         return snapshot
 
-    # 按分数排名
-    ranked = sorted(blue_scores.items(), key=lambda x: x[1], reverse=True)
-    consensus_pool = [b for b, _ in ranked[:core_blue_pool_size]]
-    anti_blues = [b for b, _ in ranked[core_blue_pool_size:]]  # 引擎低分蓝球
-
+    consensus_pool = [int(ball) for ball in snapshot.get("blue_pool", [])][:pool_size]
+    if not consensus_pool:
+        consensus_pool = [ball for ball, _ in sorted(full_scores.items(), key=lambda item: item[1], reverse=True)[:pool_size]]
+    anti_blues = [
+        ball for ball, _ in sorted(full_scores.items(), key=lambda item: item[1], reverse=True)
+        if ball not in consensus_pool
+    ]
     if not anti_blues:
         return snapshot
 
-    # 获取引擎各维度原始分数（用于发现"偏科"球）
-    engine_details = snapshot.get("blue_engine_details", {})
-    # 重新获取完整引擎结果
-    all_scores = blue_engine.predict(pool_size=16)
-    details = all_scores.get("details", {})
+    details = snapshot.get("blue_engine_details", {}) or {}
+    if not details and blue_engine is not None:
+        details = blue_engine.predict(pool_size=16).get("details", {}) or {}
 
-    # 检查每个反共识蓝球在各维度的表现
-    dimension_keys = ["missing_scores", "amp_scores", "heat_scores"]
+    dimension_keys = ["amp_scores", "heat_scores"]
+    # Different dimensions use different numeric scales. A fixed absolute
+    # threshold would label ordinary heat scores as "standout". Use the third
+    # highest value in each dimension as a relative cutoff instead.
+    dimension_cutoffs = {}
+    for key in dimension_keys:
+        values = details.get(key, {}) or {}
+        if isinstance(values, dict) and values:
+            ranked_values = sorted((float(value) for value in values.values()), reverse=True)
+            dimension_cutoffs[key] = ranked_values[min(2, len(ranked_values) - 1)]
+
     promoted = []
-
     for ball in anti_blues:
-        best_dim_score = 0.0
-        for dim_key in dimension_keys:
-            dim_data = details.get(dim_key, {})
-            if isinstance(dim_data, dict):
-                dim_score = float(dim_data.get(ball, 0.0))
-                best_dim_score = max(best_dim_score, dim_score)
-
-        # 如果某个维度得分 >= 0.7，且在遗漏维度表现好 → 有晋升资格
-        missing_data = details.get("missing_scores", {})
-        missing_score = float(missing_data.get(ball, 0.0)) if isinstance(missing_data, dict) else 0.0
-
-        # 冷号（高遗漏分 >= 2.0）或某维度特别突出
-        if missing_score >= 2.0 or best_dim_score >= 0.85:
+        missing_values = details.get("missing_scores", {}) or {}
+        missing_score = float(missing_values.get(ball, 0.0)) if isinstance(missing_values, dict) else 0.0
+        relative_standout = False
+        for key, cutoff in dimension_cutoffs.items():
+            values = details.get(key, {}) or {}
+            if isinstance(values, dict) and float(values.get(ball, float("-inf"))) >= cutoff:
+                relative_standout = True
+                break
+        if missing_score >= 2.0 or relative_standout:
             promoted.append(ball)
+        if len(promoted) >= 2:
+            break
 
-    # 最多晋升 2 个反共识蓝球，替换池中最低分的球
-    max_promote = 2
-    promoted = promoted[:max_promote]
+    if not promoted:
+        return snapshot
 
-    if promoted:
-        # 从池中移除最低分的球
-        consensus_pool_scores = [(b, blue_scores.get(b, 0.0)) for b in consensus_pool]
-        consensus_pool_scores.sort(key=lambda x: x[1])
-        new_pool = [b for b, _ in consensus_pool_scores[len(promoted):]]
-        new_pool.extend(promoted)
-        # 按原分数重新排序
-        new_pool.sort(key=lambda b: blue_scores.get(b, 0.0), reverse=True)
-
-        snapshot["blue_pool"] = new_pool
-        snapshot["blue_scores"] = {b: round(float(blue_scores.get(b, 1.0)), 6) for b in new_pool}
-        snapshot["blue_debate_promoted"] = promoted
-        snapshot["blue_debate_demoted"] = [b for b, _ in consensus_pool_scores[:len(promoted)]]
-
+    demotion_order = sorted(consensus_pool, key=lambda ball: full_scores.get(ball, 0.0))
+    demoted = demotion_order[:len(promoted)]
+    new_pool = [ball for ball in consensus_pool if ball not in demoted] + promoted
+    new_pool.sort(key=lambda ball: full_scores.get(ball, 0.0), reverse=True)
+    snapshot["blue_pool"] = new_pool[:pool_size]
+    snapshot["blue_scores"] = {ball: full_scores.get(ball, 0.0) for ball in snapshot["blue_pool"]}
+    snapshot["blue_debate_promoted"] = promoted
+    snapshot["blue_debate_demoted"] = demoted
     return snapshot
+
+
+
+def _mix_anti_consensus_reds(
+    base_reds: List[int],
+    anti_candidates: List[int],
+    red_scores: Dict[int, float],
+    anti_count: int,
+    rng: random.Random,
+) -> List[int]:
+    """Build a hybrid exploration row instead of discarding all model signal."""
+    anti_count = max(0, min(6, int(anti_count)))
+    keep_count = 6 - anti_count
+    base_ranked = sorted(
+        dict.fromkeys(int(ball) for ball in base_reds),
+        key=lambda ball: float(red_scores.get(ball, 0.0)),
+        reverse=True,
+    )
+    kept = base_ranked[:keep_count]
+    pool = [int(ball) for ball in dict.fromkeys(anti_candidates) if int(ball) not in kept]
+    selected = []
+    while len(selected) < anti_count and pool:
+        weights = [1.0 / (max(float(red_scores.get(ball, 0.0)), 0.0) + 0.1) for ball in pool]
+        threshold = rng.random() * sum(weights)
+        cumulative = 0.0
+        for idx, weight in enumerate(weights):
+            cumulative += weight
+            if cumulative >= threshold:
+                selected.append(pool.pop(idx))
+                break
+    if len(kept) + len(selected) < 6:
+        fallback = [ball for ball in range(1, 34) if ball not in kept and ball not in selected]
+        selected.extend(fallback[:6 - len(kept) - len(selected)])
+    return sorted((kept + selected)[:6])
 
 
 def generate_team_matrix_tickets(
@@ -2219,7 +2266,13 @@ def generate_team_matrix_tickets(
     seed: Optional[int] = None,
 ) -> List[Dict[str, object]]:
     runtime = _deep_merge_dict(DEFAULT_RUNTIME_CONFIG, runtime_config or {})
-    pos = analyze_positions(records) if records else None
+    position_params = runtime.get("position_params", {}) or {}
+    pos = analyze_positions(
+        records,
+        recent_periods=int(position_params.get("recent_periods", GLOBAL_CONFIG.position_analysis_periods)),
+        min_weight=float(position_params.get("min_weight", GLOBAL_CONFIG.pos_weight_min)),
+        max_weight=float(position_params.get("max_weight", GLOBAL_CONFIG.pos_weight_max)),
+    ) if records else None
     pos_w = pos.get('pos_weights') if pos else None
     snapshot = build_core_pool_snapshot(
         teams, lead_model, diff_factor=diff_factor, runtime_config=runtime, pos_weights=pos_w
@@ -2253,6 +2306,8 @@ def generate_team_matrix_tickets(
             snapshot["blue_pool"] = blue_pool
             snapshot["blue_scores"] = {b: blue_scores_full.get(b, 1.0) for b in blue_pool}
             snapshot["blue_scores_full"] = {b: blue_scores_full.get(b, 1.0) for b in range(1, 17)}
+            snapshot["blue_engine_details"] = blue_result.get("details", {}) or {}
+            snapshot = _build_blue_debate(snapshot, blue_engine, runtime_config=runtime)
         except Exception:
             blue_scores_simple, blue_pool_simple = _simple_blue_score(records)
             blue_pool = blue_pool_simple[:core_blue_pool_size]
@@ -2276,40 +2331,45 @@ def generate_team_matrix_tickets(
     all_33_set = set(range(1, 34))
     full_anti = sorted(all_33_set - consensus_22)
 
-    def _build_anti_ticket(anti_idx: int) -> Dict[str, object]:
+    anti_red_count = int(runtime.get("fusion_params", {}).get("anti_ticket_red_count", 2))
+
+    def _build_anti_ticket(anti_idx: int, base_ticket: Dict[str, object]) -> Dict[str, object]:
         anti_candidates = list(full_anti)
-        if len(anti_candidates) < 6:
-            extra = sorted(consensus_22, key=lambda b: full_scores.get(b, 0.0))[:6-len(anti_candidates)]
-            anti_candidates.extend(extra)
+        if len(anti_candidates) < anti_red_count:
+            extra = sorted(consensus_22, key=lambda b: full_scores.get(b, 0.0))
+            anti_candidates.extend(extra[:anti_red_count - len(anti_candidates)])
         anti_seed = seed or _stable_int_seed(f"anti-{anti_idx}", tuple(full_anti))
         rng_a = random.Random(anti_seed)
-        anti_weights = [1.0 / (full_scores.get(b, 0.1) + 0.1) for b in anti_candidates]
-        anti_reds = []; pool_c = list(anti_candidates); w_c = list(anti_weights)
-        while len(anti_reds) < 6 and pool_c:
-            r_val = rng_a.random() * sum(w_c); acc = 0.0
-            for idx, w in enumerate(w_c):
-                acc += w
-                if acc >= r_val: anti_reds.append(pool_c.pop(idx)); w_c.pop(idx); break
-            else: anti_reds.append(pool_c.pop(-1)); w_c.pop(-1) if w_c else None
-        anti_reds.sort()
+        anti_reds = _mix_anti_consensus_reds(
+            list(base_ticket.get("red", [])),
+            anti_candidates,
+            full_scores,
+            anti_count=anti_red_count,
+            rng=rng_a,
+        )
         bs_s, _ = _simple_blue_score(records) if records else ({}, [])
         existing_b = {t.get("blue", 0) for t in tickets}
         anti_blue = rng_a.randint(1, 16)
         if bs_s:
             for b, _ in sorted(bs_s.items(), key=lambda x: -x[1]):
-                if b not in existing_b: anti_blue = b; break
+                if b not in existing_b:
+                    anti_blue = b
+                    break
+        strategy = f"anti_hybrid_{anti_red_count}"
         return {"red": anti_reds, "blue": anti_blue, "sources": ["anti_consensus"],
-            "explain": f"反共识票{anti_idx+1};红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
-            "explain_json": {"sources": ["anti_consensus"], "strategy": f"anti_{anti_idx+1}",
-                "red": [{"ball": int(b), "top_agent": "anti", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
+            "explain": f"反共识混合票{anti_idx+1};探索红球数={anti_red_count};红球={' '.join(f'{b:02d}' for b in anti_reds)};蓝球={anti_blue:02d}",
+            "explain_json": {"sources": ["anti_consensus"], "strategy": strategy,
+                "red": [{"ball": int(b), "top_agent": "anti" if b in full_anti else "model", "top_contribution": 0.0, "agent_contributions": {}} for b in anti_reds],
                 "blue": {"ball": int(anti_blue), "top_agent": "anti", "top_contribution": 0.0, "agent_contributions": {}},
-                "core_pool": {"red_pool": full_anti}, "diversity_replacements": [], "tier_strategy": f"anti_{anti_idx+1}"},
+                "core_pool": {"red_pool": full_anti}, "diversity_replacements": [], "tier_strategy": strategy,
+                "replaced_matrix_row_id": base_ticket.get("matrix_row_id")},
             "diversity_replacements": [], "matrix_row_id": 5 + anti_idx + 1}
 
     if len(tickets) >= 5:
         sorted_idx = sorted(range(len(tickets)),
             key=lambda i: sum(full_scores.get(b, 0.0) for b in tickets[i].get("red", [])) / max(1, len(tickets[i].get("red", []))))
-        tickets[sorted_idx[0]] = _build_anti_ticket(0)
+        weakest_idx = sorted_idx[0]
+        tickets[weakest_idx] = _build_anti_ticket(0, tickets[weakest_idx])
 
     return tickets[:5]
 
@@ -2321,7 +2381,7 @@ def _generate_stratified_tickets(
 ) -> List[Dict[str, object]]:
     """分层采样出票：信念票集中高分球，覆盖票聚焦反共识。
 
-    将 24 球池按分数从高到低分为 4 层（每层 6 球）：
+    将核心红球池按分数从高到低分为 4 层：
       - Tier 1 (Top 6):  最高共识分 → 信念票核心
       - Tier 2 (7-12):   次高共识分 → 信念票+平衡票
       - Tier 3 (13-18):  中等分（含辩论晋升球）→ 平衡票+覆盖票
@@ -3484,6 +3544,8 @@ def main():
                        help='运行 team-cover 实验模式回测（只读历史数据，不写归档）')
     parser.add_argument('--backtest-cycles', type=int, default=36,
                        help='team 端到端矩阵回测期数（默认36期）')
+    parser.add_argument('--backtest-use-current-patches', action='store_true',
+                       help='离线实验：回测时显式加载当前补丁（默认关闭，避免未来信息泄漏）')
     parser.add_argument('--advanced', '-adv', action='store_true',
                        help='使用高级综合分析（时间加权+关联分析+模式识别+遗传算法）')
     parser.add_argument('--enhanced', '-e', action='store_true',
@@ -3532,10 +3594,11 @@ def main():
     print("=" * 60)
 
     if args.team_cover_backtest:
-        resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
-        _ = patch_source
-        runtime_config = resolve_runtime_config()
-        initial_weights = load_weight_patch(resolved_patch_path)
+        runtime_config, initial_weights, patch_source = resolve_backtest_priors(
+            args.backtest_use_current_patches,
+            args.weight_patch,
+        )
+        print(f"\n🧪 回测先验: {patch_source}（默认 clean；当前补丁需显式启用）")
         progress_state = {"last_len": 0}
 
         def _print_team_cover_backtest_progress(update: Dict[str, object]) -> None:
@@ -3599,10 +3662,11 @@ def main():
         return
 
     if args.team_backtest:
-        resolved_patch_path, patch_source = resolve_weight_patch_path(args.weight_patch)
-        _ = patch_source
-        runtime_config = resolve_runtime_config()
-        initial_weights = load_weight_patch(resolved_patch_path)
+        runtime_config, initial_weights, patch_source = resolve_backtest_priors(
+            args.backtest_use_current_patches,
+            args.weight_patch,
+        )
+        print(f"\n🧪 回测先验: {patch_source}（默认 clean；当前补丁需显式启用）")
         expert_backtest = backtest_report(records, learning_cycles=min(args.backtest_cycles, args.learn_cycles or args.backtest_cycles))
         progress_state = {"last_len": 0}
 
