@@ -39,11 +39,15 @@ prediction_archive/ ──→ analyze_archive.py
 
 | 文件 | 角色 | 关键点 |
 |------|------|--------|
-| `predict.py` | 主入口 (~3500行) | team/single/team-cover 三种模式；回测；补丁回灌；反共识辩论 |
+| `predict.py` | 主入口 / 编排层 | team/single/team-cover；出票；回测工作流；补丁回灌；反共识辩论 |
 | `project_config.py` | **全局配置中心** | `ProjectConfig` dataclass → `to_runtime_config()` 生成 pool/fusion/matrix/blue/cover 五组参数；`GLOBAL_CONFIG` 单例 |
 | `agent_registry.py` | 专家注册表 | `AGENT_TEAMS = (hot, cold, missing, balanced, random, cycle, sum, zone)`，不含 lstm |
 | `blue_ball_engine.py` | 蓝球独立引擎 | 7 维度分析：遗漏/奇偶/区间转移/振幅/热度/移动平均/贝叶斯；通过 `config` dict 接收参数 |
-| `analyze_archive.py` | 离线分析器 | 读归档 KV 格式，回填真实开奖结果，生成三类补丁和 CSV/JSON 报告 |
+| `analyze_archive.py` | 离线分析器 | 读归档 KV、回填结果、按可复现版本分组，生成三类补丁及 JSON/CSV/versions CSV |
+| `archive_provenance.py` | 归档溯源 | 生成 schema/runtime/patch/seed/commit 元数据 |
+| `backtest_reporting.py` | 回测报告辅助 | stability 统计、bootstrap CI、rolling fold/阈值候选、JSON/CSV 导出 |
+| `backtest_cache.py` | 回测缓存 | 有界 LRU、不变量样本上下文、确定性 key 和遥测 |
+| `parameter_promotion.py` | 参数晋升保护 | 证据门禁、审计结论和候选补丁；不会自动激活 latest |
 | `enhanced_analysis.py` | 增强分析 | 奖池影响分析、扩展数据融合权重 |
 | `feature_importance.py` | 特征重要性 | Pearson/Spearman 相关系数，零额外依赖 |
 | `visual_analyzer.py` | 可视化 | matplotlib 图表生成（可选依赖） |
@@ -81,6 +85,8 @@ main() → run_team_mode()
 
 --team-stability-backtest → team_stability_backtest_report() → optional JSON/CSV export
 --team-threshold-calibration → team_threshold_calibration_report() → expanding-window validation → optional JSON/CSV export
+parameter_promotion.py → evidence gates → hold or candidate patch (never auto-activate latest)
+analyze_archive.py → composite version grouping → `<prefix>.versions.csv`
   └── 多窗口多seed配对 dynamic / legacy → 目标差、波动、稳健分
 ```
 
@@ -167,6 +173,7 @@ python predict.py --team-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-cover-backtest --backtest-cycles 36 --seed 42
 python predict.py --team-stability-backtest --stability-windows 36,72,108,144 --stability-seeds 7,42,101,202,777,2026 --stability-export-prefix prediction_archive/stability_report
 python predict.py --team-threshold-calibration --calibration-train-cycles 36 --calibration-validation-cycles 12 --calibration-folds 3 --calibration-seeds 42 --calibration-export-prefix prediction_archive/threshold_calibration
+python parameter_promotion.py --calibration-report prediction_archive/threshold_calibration.json --stability-report prediction_archive/stability_report.json --output prediction_archive/promotion_decision.json --candidate-patch-output config/param_patch.candidate.json
 # Offline sensitivity experiment only:
 python predict.py --team-cover-backtest --backtest-use-current-patches --backtest-cycles 36 --seed 42
 
@@ -188,5 +195,7 @@ python -m unittest test_predict -v
 - 改 CLI / 输出 / 补丁行为：同步 `README.md`、`SKILL.md`、`AGENTS.md`、`CLAUDE.md`
 - 改 `project_config.py`：同步检查 `blue_ball_engine.py`、`to_runtime_config()` 输出、`param_patch` 回灌路径
 - 改回测口径：同步检查 `README.md` 中的命令示例、反事实字段、蓝球校准、stability 置信区间/导出和 rolling calibration 描述
+- 改回测报告/归档溯源辅助：保持 `predict.py` 的名称转发兼容，并同步对应独立测试
+- 改参数晋升门禁：保持审计 schema、拒绝覆盖 latest、人工激活约束及四份入口文档一致
 - 改预测归档：保留 compact KV 的 ticket/explain/lead_summary 兼容性，并同步 schema/runtime/patch/seed/commit 元数据说明
 - 改 `BlueBallEngine` 参数：同步 `project_config.py` 的 `blue_*` 字段和 `to_runtime_config()[“blue_params”]`

@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 DATA_FILE = GLOBAL_CONFIG.data_file
 
 DATA_FILE = "lottery_data.json"
+LEGACY_VERSION = "legacy-unversioned"
+ARCHIVE_VERSION_KEYS = ("archive_schema_version", "runtime_config_hash", "patch_config_hash", "git_commit")
 
 
 def _is_valid_agent(agent: object) -> bool:
@@ -47,6 +49,27 @@ def _parse_archive_kv(file_path: str) -> Dict[str, str]:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
     return values
+
+
+def _normalize_archive_metadata(values: Dict[str, str]) -> Dict[str, str]:
+    metadata = {
+        key: str(values.get(key, "") or "").strip() or LEGACY_VERSION
+        for key in ARCHIVE_VERSION_KEYS
+    }
+    prediction_seed = str(values.get("prediction_seed") or values.get("seed") or "").strip()
+    metadata["prediction_seed"] = prediction_seed or LEGACY_VERSION
+    if all(metadata[key] == LEGACY_VERSION for key in ARCHIVE_VERSION_KEYS):
+        metadata["version_label"] = LEGACY_VERSION
+    else:
+        metadata["version_label"] = (
+            f"schema={metadata['archive_schema_version']}|commit={metadata['git_commit']}|"
+            f"runtime={metadata['runtime_config_hash']}|patch={metadata['patch_config_hash']}"
+        )
+    return metadata
+
+
+def _version_identity(metadata: Dict[str, object]) -> tuple:
+    return tuple(str(metadata.get(key, LEGACY_VERSION) or LEGACY_VERSION) for key in ARCHIVE_VERSION_KEYS)
 
 
 def load_actual_records(data_file: str = DATA_FILE) -> List[Dict[str, object]]:
@@ -118,6 +141,7 @@ def collect_explain_json_records(
     rows: List[Dict[str, object]] = []
     for file_path in files:
         values = _parse_archive_kv(file_path)
+        metadata = _normalize_archive_metadata(values)
         period = values.get("period") or os.path.splitext(os.path.basename(file_path))[0]
         for key, raw in values.items():
             if not key.startswith("ticket") or not key.endswith("_explain_json"):
@@ -137,11 +161,84 @@ def collect_explain_json_records(
                     "period": str(period),
                     "ticket_index": ticket_index,
                     "file_path": file_path,
+                    "archive_metadata": dict(metadata),
                     "payload": payload,
                 }
             )
     rows.sort(key=lambda r: (r["period"], r["ticket_index"]))
     return rows
+
+
+def build_version_group_report(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    grouped: Dict[tuple, Dict[str, object]] = {}
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("archive_metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        normalized = {
+            key: str(metadata.get(key, LEGACY_VERSION) or LEGACY_VERSION)
+            for key in ARCHIVE_VERSION_KEYS
+        }
+        normalized["prediction_seed"] = str(metadata.get("prediction_seed", LEGACY_VERSION) or LEGACY_VERSION)
+        identity = _version_identity(normalized)
+        bucket = grouped.setdefault(identity, {
+            **normalized,
+            "version_label": LEGACY_VERSION if all(value == LEGACY_VERSION for value in identity) else (
+                f"schema={identity[0]}|commit={identity[3]}|runtime={identity[1]}|patch={identity[2]}"
+            ),
+            "ticket_count": 0,
+            "periods": set(),
+            "seed_counts": Counter(),
+            "resolved_ticket_count": 0,
+            "red_hits_total": 0.0,
+            "blue_hits": 0,
+            "hit_score_total": 0.0,
+            "red_hits_ge2": 0,
+            "red_hits_ge3": 0,
+        })
+        bucket["ticket_count"] += 1
+        bucket["periods"].add(str(row.get("period", "")))
+        bucket["seed_counts"][normalized["prediction_seed"]] += 1
+        payload = row.get("payload", {})
+        actual = payload.get("actual_result") if isinstance(payload, dict) else None
+        if not isinstance(actual, dict) or "red_hits" not in actual:
+            continue
+        try:
+            red_hits = int(actual.get("red_hits", 0))
+            blue_hit = int(actual.get("blue_hit", 0))
+            hit_score = float(actual.get("hit_score", red_hits + blue_hit * 1.5))
+        except (TypeError, ValueError):
+            continue
+        bucket["resolved_ticket_count"] += 1
+        bucket["red_hits_total"] += red_hits
+        bucket["blue_hits"] += 1 if blue_hit else 0
+        bucket["hit_score_total"] += hit_score
+        bucket["red_hits_ge2"] += 1 if red_hits >= 2 else 0
+        bucket["red_hits_ge3"] += 1 if red_hits >= 3 else 0
+
+    report: List[Dict[str, object]] = []
+    for bucket in grouped.values():
+        resolved = int(bucket["resolved_ticket_count"])
+        denominator = max(1, resolved)
+        report.append({
+            "version_label": bucket["version_label"],
+            "archive_schema_version": bucket["archive_schema_version"],
+            "git_commit": bucket["git_commit"],
+            "runtime_config_hash": bucket["runtime_config_hash"],
+            "patch_config_hash": bucket["patch_config_hash"],
+            "ticket_count": int(bucket["ticket_count"]),
+            "period_count": len(bucket["periods"]),
+            "resolved_ticket_count": resolved,
+            "seed_distribution": dict(sorted(bucket["seed_counts"].items())),
+            "avg_red_hits": round(float(bucket["red_hits_total"]) / denominator, 6) if resolved else 0.0,
+            "blue_hit_rate": round(int(bucket["blue_hits"]) / denominator, 6) if resolved else 0.0,
+            "avg_hit_score": round(float(bucket["hit_score_total"]) / denominator, 6) if resolved else 0.0,
+            "red_hit_rate_ge2": round(int(bucket["red_hits_ge2"]) / denominator, 6) if resolved else 0.0,
+            "red_hit_rate_ge3": round(int(bucket["red_hits_ge3"]) / denominator, 6) if resolved else 0.0,
+        })
+    report.sort(key=lambda item: (-int(item["resolved_ticket_count"]), -int(item["ticket_count"]), str(item["version_label"])))
+    return report
 
 
 def build_agent_ranking(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -629,6 +726,7 @@ def export_reports(
     matrix_ranking: Optional[List[Dict[str, object]]] = None,
     records: Optional[List[Dict[str, object]]] = None,
     experiment_report: Optional[Dict[str, object]] = None,
+    version_groups: Optional[List[Dict[str, object]]] = None,
 ) -> Dict[str, str]:
     base = export_prefix
     root, ext = os.path.splitext(base)
@@ -639,6 +737,8 @@ def export_reports(
     weight_patch_path = f"{base}.weight_patch.json"
     matrix_patch_path = f"{base}.matrix_patch.json"
     param_patch_path = f"{base}.param_patch.json"
+    versions_csv_path = f"{base}.versions.csv"
+    resolved_version_groups = version_groups if version_groups is not None else build_version_group_report(records or [])
     payload = {
         "all_time_ranking": all_time_ranking,
         "recent_ranking": recent_ranking,
@@ -646,6 +746,7 @@ def export_reports(
         "weight_adjustments": weight_adjustments or [],
         "matrix_ranking": matrix_ranking or [],
         "suggestions": suggestions,
+        "version_groups": resolved_version_groups,
     }
     if experiment_report:
         payload["experiment_report"] = build_experiment_comparison(experiment_report)
@@ -672,6 +773,19 @@ def export_reports(
                     "weight_delta": weight_map.get(agent, {}).get("weight_delta", 0.0),
                 }
             )
+    version_fieldnames = [
+        "version_label", "archive_schema_version", "git_commit", "runtime_config_hash", "patch_config_hash",
+        "ticket_count", "period_count", "resolved_ticket_count", "seed_distribution", "avg_red_hits",
+        "blue_hit_rate", "avg_hit_score", "red_hit_rate_ge2", "red_hit_rate_ge3",
+    ]
+    with open(versions_csv_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=version_fieldnames)
+        writer.writeheader()
+        for group in resolved_version_groups:
+            csv_row = dict(group)
+            csv_row["seed_distribution"] = json.dumps(group.get("seed_distribution", {}), ensure_ascii=False, sort_keys=True)
+            writer.writerow({key: csv_row.get(key, "") for key in version_fieldnames})
+
     patch_payload = build_weight_patch_payload(all_time_ranking, weight_adjustments or [])
     with open(weight_patch_path, "w", encoding="utf-8") as f:
         json.dump(patch_payload, f, ensure_ascii=False, indent=2)
@@ -687,6 +801,7 @@ def export_reports(
         "weight_patch": weight_patch_path,
         "matrix_patch": matrix_patch_path,
         "param_patch": param_patch_path,
+        "versions_csv": versions_csv_path,
     }
 
 
@@ -704,6 +819,7 @@ def render_report(
     delta_ranking = compute_dual_view_delta(recent_ranking, ranking)
     weight_adjustments = build_weight_adjustments(recent_ranking, ranking, step=suggest_step)
     matrix_ranking = build_matrix_row_ranking(records)
+    version_groups = build_version_group_report(records)
     suggestions = build_tuning_suggestions(ranking, records)
 
     lines = []
@@ -733,6 +849,15 @@ def render_report(
                 f"  {idx:02d}. type={row['matrix_type']} | row={row['row_id']} | samples={row['samples']} | "
                 f"avg_score={row['avg_score']:.6f} | red_hit_avg={row['red_hit_avg']:.6f} | "
                 f"blue_hit_rate={row['blue_hit_rate']:.2%} | hit_rate_ge2={row['hit_rate_ge2']:.2%} | hit_rate_ge3={row['hit_rate_ge3']:.2%}"
+            )
+        lines.append("")
+    if version_groups:
+        lines.append("版本分组（schema/commit/runtime/patch）:")
+        for idx, group in enumerate(version_groups[: max(1, int(top_k))], start=1):
+            lines.append(
+                f"  {idx:02d}. {group['version_label']} | tickets={group['ticket_count']} | "
+                f"periods={group['period_count']} | resolved={group['resolved_ticket_count']} | "
+                f"avg_score={group['avg_hit_score']:.6f} | blue_hit_rate={group['blue_hit_rate']:.2%}"
             )
         lines.append("")
     lines.append("调参建议:")
@@ -771,6 +896,7 @@ def main():
     delta_ranking = compute_dual_view_delta(recent_ranking, all_time_ranking)
     weight_adjustments = build_weight_adjustments(recent_ranking, all_time_ranking, step=args.suggest_step)
     matrix_ranking = build_matrix_row_ranking(records)
+    version_groups = build_version_group_report(records)
     suggestions = build_tuning_suggestions(all_time_ranking, records)
 
     print(
@@ -792,6 +918,7 @@ def main():
             weight_adjustments=weight_adjustments,
             matrix_ranking=matrix_ranking,
             records=records,
+            version_groups=version_groups,
         )
         latest_path = write_latest_weight_patch(paths["weight_patch"], args.latest_patch_path)
         latest_matrix_path = write_latest_matrix_patch(paths["matrix_patch"], args.latest_matrix_patch_path)
@@ -801,6 +928,7 @@ def main():
         print(f"已导出权重补丁: {paths['weight_patch']}")
         print(f"已导出矩阵补丁: {paths['matrix_patch']}")
         print(f"已导出参数补丁: {paths['param_patch']}")
+        print(f"已导出版本分组: {paths['versions_csv']}")
         print(f"已写回最新补丁: {latest_path}")
         print(f"已写回最新矩阵补丁: {latest_matrix_path}")
         print(f"已写回最新参数补丁: {latest_param_path}")

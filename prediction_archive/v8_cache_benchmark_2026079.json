@@ -1,0 +1,42 @@
+{
+  "benchmark_schema_version": "backtest-cache-benchmark/v1",
+  "benchmarks": [
+    {
+      "cache": {
+        "entries": 1,
+        "evictions": 0,
+        "hits": 1,
+        "max_entries": 2,
+        "misses": 1,
+        "prepared_samples": 4
+      },
+      "cached_seconds": 3.204,
+      "cycles": 4,
+      "result_equivalence": true,
+      "seed": 7,
+      "speedup": 1.971,
+      "uncached_seconds": 6.317,
+      "workflow": "paired dynamic+legacy matrix reports"
+    },
+    {
+      "cache": {
+        "entries": 2,
+        "evictions": 0,
+        "hits": 2,
+        "max_entries": 4,
+        "misses": 2,
+        "prepared_samples": 4
+      },
+      "cached_seconds": 0.678,
+      "result_equivalence": true,
+      "speedup": 1.965,
+      "train_cycles": 2,
+      "uncached_seconds": 1.332,
+      "validation_cycles": 2,
+      "workflow": "rolling calibration smoke: one fold, two candidates, seed 7"
+    }
+  ],
+  "data_latest_period": "2026079",
+  "generated_at": "2026-07-14T03:45:47",
+  "note": "Timing is a local smoke benchmark, not a stable performance guarantee."
+}

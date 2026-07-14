@@ -9,13 +9,15 @@ from project_config import GLOBAL_CONFIG
 
 
 class AnalyzeArchiveTests(unittest.TestCase):
-    def _write_archive(self, folder, period, rows):
+    def _write_archive(self, folder, period, rows, metadata=None):
         path = os.path.join(folder, f"{period}.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"period={period}\n")
             f.write("generated_at=2026-04-07 00:00:00\n")
             f.write(f"ticket_count={len(rows)}\n")
             f.write("lead_summary=factor=1.00\n")
+            for key, value in (metadata or {}).items():
+                f.write(f"{key}={value}\n")
             for i, row in enumerate(rows, start=1):
                 f.write(f"ticket{i}=01 02 03 04 05 06+07|hot\n")
                 payload = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
@@ -76,6 +78,102 @@ class AnalyzeArchiveTests(unittest.TestCase):
             self.assertEqual(actual["hit_score"], 4.5)
             self.assertEqual(actual["actual_red_balls"], [1, 3, 5, 7, 9, 11])
             self.assertEqual(actual["actual_blue_ball"], 7)
+
+    def test_collect_records_attaches_version_metadata_and_preserves_legacy(self):
+        payload = {"sources": ["hot"], "red": [], "blue": {}, "diversity_replacements": []}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_archive(temp_dir, "2026036", [payload])
+            self._write_archive(
+                temp_dir,
+                "2026037",
+                [payload],
+                metadata={
+                    "archive_schema_version": "2",
+                    "runtime_config_hash": "runtime-a",
+                    "patch_config_hash": "patch-a",
+                    "prediction_seed": "7",
+                    "git_commit": "commit-a",
+                },
+            )
+            records = analyze_archive.collect_explain_json_records(temp_dir, actual_records=[])
+        by_period = {row["period"]: row["archive_metadata"] for row in records}
+        self.assertEqual(by_period["2026037"]["git_commit"], "commit-a")
+        self.assertEqual(by_period["2026037"]["prediction_seed"], "7")
+        self.assertEqual(by_period["2026036"]["version_label"], "legacy-unversioned")
+        self.assertEqual(by_period["2026036"]["runtime_config_hash"], "legacy-unversioned")
+
+    def test_build_version_group_report_aggregates_composite_versions(self):
+        base_metadata = {
+            "archive_schema_version": "2",
+            "runtime_config_hash": "runtime-a",
+            "patch_config_hash": "patch-a",
+            "git_commit": "commit-a",
+        }
+        records = [
+            {
+                "period": "2026036", "ticket_index": 1,
+                "archive_metadata": dict(base_metadata, prediction_seed="7", version_label="commit-a/runtime-a/patch-a"),
+                "payload": {"actual_result": {"red_hits": 3, "blue_hit": 1, "hit_score": 4.5}},
+            },
+            {
+                "period": "2026037", "ticket_index": 1,
+                "archive_metadata": dict(base_metadata, prediction_seed="42", version_label="commit-a/runtime-a/patch-a"),
+                "payload": {"actual_result": {"red_hits": 1, "blue_hit": 0, "hit_score": 1.0}},
+            },
+            {
+                "period": "2026037", "ticket_index": 2,
+                "archive_metadata": dict(base_metadata, prediction_seed="42", version_label="commit-a/runtime-a/patch-a"),
+                "payload": {"actual_result": {"red_hits": 2, "blue_hit": 0, "hit_score": 2.0}},
+            },
+            {
+                "period": "2026038", "ticket_index": 1,
+                "archive_metadata": {
+                    "archive_schema_version": "2", "runtime_config_hash": "runtime-b",
+                    "patch_config_hash": "patch-a", "prediction_seed": "7", "git_commit": "commit-a",
+                    "version_label": "commit-a/runtime-b/patch-a",
+                },
+                "payload": {"actual_result": {"red_hits": 4, "blue_hit": 1, "hit_score": 5.5}},
+            },
+            {
+                "period": "2026035", "ticket_index": 1,
+                "archive_metadata": {
+                    "archive_schema_version": "legacy-unversioned", "runtime_config_hash": "legacy-unversioned",
+                    "patch_config_hash": "legacy-unversioned", "prediction_seed": "legacy-unversioned",
+                    "git_commit": "legacy-unversioned", "version_label": "legacy-unversioned",
+                },
+                "payload": {},
+            },
+        ]
+        groups = analyze_archive.build_version_group_report(records)
+        self.assertEqual(len(groups), 3)
+        primary = next(group for group in groups if group["runtime_config_hash"] == "runtime-a")
+        self.assertEqual(primary["ticket_count"], 3)
+        self.assertEqual(primary["period_count"], 2)
+        self.assertEqual(primary["resolved_ticket_count"], 3)
+        self.assertEqual(primary["seed_distribution"], {"42": 2, "7": 1})
+        self.assertEqual(primary["avg_red_hits"], 2.0)
+        self.assertEqual(primary["blue_hit_rate"], round(1 / 3, 6))
+        self.assertEqual(primary["red_hit_rate_ge2"], round(2 / 3, 6))
+        legacy = next(group for group in groups if group["version_label"] == "legacy-unversioned")
+        self.assertEqual(legacy["resolved_ticket_count"], 0)
+
+    def test_version_groups_are_rendered_and_exported_additively(self):
+        payload = {"sources": ["hot"], "red": [], "blue": {}, "diversity_replacements": []}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_archive(temp_dir, "2026036", [payload])
+            records = analyze_archive.collect_explain_json_records(temp_dir, actual_records=[])
+            groups = analyze_archive.build_version_group_report(records)
+            text = analyze_archive.render_report(temp_dir, top_k=1)
+            self.assertIn("版本分组", text)
+            self.assertIn("legacy-unversioned", text)
+            paths = analyze_archive.export_reports(
+                os.path.join(temp_dir, "report"), [], [], [], ["x"], records=records,
+                version_groups=groups,
+            )
+            self.assertTrue(os.path.isfile(paths["versions_csv"]))
+            with open(paths["json"], "r", encoding="utf-8") as handle:
+                exported = json.load(handle)
+            self.assertEqual(exported["version_groups"][0]["version_label"], "legacy-unversioned")
 
     def test_build_agent_ranking_and_suggestions(self):
         records = [

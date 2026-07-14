@@ -1,0 +1,128 @@
+{
+  "activation": {
+    "automatic": false,
+    "latest_patch_overwrite": false,
+    "requires_human_review": true
+  },
+  "candidate_thresholds": {
+    "min_score_gap": 0.06,
+    "one_score_threshold": 0.42,
+    "two_score_threshold": 0.58
+  },
+  "decision": "hold",
+  "default_thresholds": {
+    "min_score_gap": 0.04,
+    "one_score_threshold": 0.42,
+    "two_score_threshold": 0.58
+  },
+  "eligible": false,
+  "gates": [
+    {
+      "name": "calibration_schema",
+      "observed": "threshold-calibration/v1",
+      "passed": true,
+      "required": "threshold-calibration/v1"
+    },
+    {
+      "name": "minimum_folds",
+      "observed": 3,
+      "passed": true,
+      "required": 3
+    },
+    {
+      "name": "minimum_validation_samples",
+      "observed": 12,
+      "passed": true,
+      "required": 12
+    },
+    {
+      "name": "unique_threshold_leader",
+      "observed": 2,
+      "passed": true,
+      "required": "strictly greater than runner-up"
+    },
+    {
+      "name": "threshold_concentration",
+      "observed": 0.666667,
+      "passed": true,
+      "required": 0.6666666666666666
+    },
+    {
+      "name": "candidate_differs_from_default",
+      "observed": {
+        "candidate": {
+          "min_score_gap": 0.06,
+          "one_score_threshold": 0.42,
+          "two_score_threshold": 0.58
+        },
+        "default": {
+          "min_score_gap": 0.04,
+          "one_score_threshold": 0.42,
+          "two_score_threshold": 0.58
+        }
+      },
+      "passed": true,
+      "required": "different normalized threshold sets"
+    },
+    {
+      "name": "positive_validation_mean",
+      "observed": 0.0,
+      "passed": false,
+      "required": "> 0.0"
+    },
+    {
+      "name": "validation_ci_nonnegative",
+      "observed": 0.0,
+      "passed": true,
+      "required": 0.0
+    },
+    {
+      "name": "positive_fold_ratio",
+      "observed": 0.0,
+      "passed": false,
+      "required": 0.6666666666666666
+    },
+    {
+      "name": "stability_schema",
+      "observed": "stability-report/v2",
+      "passed": true,
+      "required": "stability-report/v2"
+    },
+    {
+      "name": "stability_minimum_runs",
+      "observed": 24,
+      "passed": true,
+      "required": 12
+    },
+    {
+      "name": "stability_positive_ratio",
+      "observed": 0.791667,
+      "passed": true,
+      "required": 0.75
+    },
+    {
+      "name": "stability_ci_nonnegative",
+      "observed": 0.00439,
+      "passed": true,
+      "required": 0.0
+    }
+  ],
+  "observed": {
+    "fold_count": 3,
+    "minimum_validation_samples": 12,
+    "positive_fold_ratio": 0.0,
+    "selected_vs_default_ci95_low": 0.0,
+    "selected_vs_default_mean": 0.0,
+    "threshold_concentration": 0.666667,
+    "threshold_leader_count": 2
+  },
+  "reasons": [
+    "positive_validation_mean",
+    "positive_fold_ratio"
+  ],
+  "review_schema_version": "parameter-promotion-review/v1",
+  "source_fingerprints": {
+    "calibration_sha256": "6d6dcd930c6991c60e3935c513c4fb9e565fbf2d3c9d83ed67edc1557044ba3b",
+    "stability_sha256": "c733c04c35cb729fa5262068cfb09b15b9bede1665631ae6b814e1386915554f"
+  }
+}

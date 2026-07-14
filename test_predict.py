@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import predict
+from backtest_cache import BacktestContextCache
 
 
 class PredictFlowTests(unittest.TestCase):
@@ -1441,8 +1442,85 @@ class PredictFlowTests(unittest.TestCase):
         self.assertEqual(report["counterfactual"]["samples"], 0)
         self.assertEqual(report["blue_calibration"]["samples"], 0)
 
+    @staticmethod
+    def _fake_backtest_tickets(*args, **kwargs):
+        tickets = []
+        for index in range(5):
+            tickets.append({
+                "red": [1 + index, 2 + index, 3 + index, 4 + index, 5 + index, 6 + index],
+                "blue": index + 1,
+                "blue_score": 1.0 - index * 0.1,
+                "matrix_row_id": index + 1,
+                "explain_json": {"core_pool": {"blue_pool": [1, 2, 3, 4, 5]}},
+            })
+        return tickets
+
+    def test_matrix_context_cache_preserves_report_and_reuses_preparation(self):
+        records = self._build_mock_records(40)
+        cache = BacktestContextCache(max_entries=2)
+        lead = {"weights": {}, "diff_scores": {}}
+        with mock.patch.object(predict, "train_lead_agent", return_value=lead) as train_mock, \
+             mock.patch.object(predict, "build_expert_teams", return_value={}) as teams_mock, \
+             mock.patch.object(predict, "generate_final_team_tickets", side_effect=self._fake_backtest_tickets):
+            uncached = predict.team_matrix_backtest_report(records, cycles=2, seed=7)
+            first = predict.team_matrix_backtest_report(records, cycles=2, seed=7, context_cache=cache)
+            second = predict.team_matrix_backtest_report(records, cycles=2, seed=7, context_cache=cache)
+        self.assertEqual(train_mock.call_count, 4)
+        self.assertEqual(teams_mock.call_count, 4)
+        strip = lambda report: {key: value for key, value in report.items() if key != "context_cache"}
+        self.assertEqual(strip(uncached), strip(first))
+        self.assertEqual(strip(first), strip(second))
+        self.assertEqual(second["context_cache"]["hits"], 1)
+
+    def test_stability_shares_context_cache_across_dynamic_and_legacy(self):
+        records = self._build_mock_records(40)
+        lead = {"weights": {}, "diff_scores": {}}
+        with mock.patch.object(predict, "train_lead_agent", return_value=lead) as train_mock, \
+             mock.patch.object(predict, "build_expert_teams", return_value={}) as teams_mock, \
+             mock.patch.object(predict, "generate_final_team_tickets", side_effect=self._fake_backtest_tickets):
+            report = predict.team_stability_backtest_report(records, windows=[2], seeds=[7])
+        self.assertEqual(train_mock.call_count, 2)
+        self.assertEqual(teams_mock.call_count, 2)
+        self.assertEqual(report["context_cache"]["hits"], 1)
+        self.assertEqual(report["context_cache"]["misses"], 1)
+
+    def test_calibration_default_evaluator_shares_context_cache_but_custom_signature_is_unchanged(self):
+        records = self._build_mock_records(40)
+        lead = {"weights": {}, "diff_scores": {}}
+        with mock.patch.object(predict, "train_lead_agent", return_value=lead) as train_mock, \
+             mock.patch.object(predict, "build_expert_teams", return_value={}) as teams_mock, \
+             mock.patch.object(predict, "generate_final_team_tickets", side_effect=self._fake_backtest_tickets):
+            report = predict.team_threshold_calibration_report(
+                records,
+                train_cycles=2,
+                validation_cycles=2,
+                fold_count=1,
+                seeds=[7],
+                one_thresholds=[0.38, 0.42],
+                two_thresholds=[0.58],
+                gap_thresholds=[0.04],
+                grid_mode="cartesian",
+            )
+        self.assertEqual(train_mock.call_count, 4)
+        self.assertEqual(teams_mock.call_count, 4)
+        self.assertGreater(report["context_cache"]["hits"], 0)
+
+        calls = []
+        def old_signature(eval_records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None):
+            calls.append(cycles)
+            return {"overall": {"best_of_5_avg_score": 0.0, "best_of_5_hit_rate_ge2": 0.0,
+                                "best_of_5_hit_rate_ge3": 0.0, "best_of_5_hit_rate_ge4": 0.0,
+                                "final_blue_hit_rate": 0.0, "avg_overlap": 0.0}}
+        custom = predict.team_threshold_calibration_report(
+            records, train_cycles=2, validation_cycles=2, fold_count=1, seeds=[7],
+            one_thresholds=[0.42], two_thresholds=[0.58], gap_thresholds=[0.04],
+            grid_mode="cartesian", evaluator=old_signature,
+        )
+        self.assertTrue(calls)
+        self.assertFalse(custom["context_cache"]["enabled"])
+
     def test_team_stability_backtest_aggregates_paired_runs(self):
-        def fake_report(records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None):
+        def fake_report(records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None, context_cache=None):
             strategy = runtime_config["fusion_params"]["anti_ticket_strategy"]
             uplift = 0.05 if strategy == "dynamic" else 0.0
             overall = {
@@ -1490,7 +1568,7 @@ class PredictFlowTests(unittest.TestCase):
             self.assertEqual(stats[key], 0 if key == "samples" else 0.0)
 
     def test_team_stability_backtest_groups_runs_and_counts_pair_outcomes(self):
-        def fake_report(records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None):
+        def fake_report(records, cycles, seed, runtime_config, initial_weights=None, progress_callback=None, context_cache=None):
             strategy = runtime_config["fusion_params"]["anti_ticket_strategy"]
             sign = 1.0 if seed == 7 else -1.0
             uplift = 0.04 * sign if strategy == "dynamic" else 0.0
