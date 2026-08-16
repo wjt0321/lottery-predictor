@@ -1,12 +1,28 @@
 {
   "metadata": {
-    "total_records": 358,
-    "date_range": "2024-04-04 至 2026-08-11",
-    "last_updated": "2026-08-13 15:00:06",
+    "total_records": 359,
+    "date_range": "2024-04-04 至 2026-08-13",
+    "last_updated": "2026-08-16 15:00:07",
     "source": "500.com-real",
     "is_real": true
   },
   "records": [
+    {
+      "period": "2026093",
+      "date": "2026-08-13",
+      "red_balls": [
+        5,
+        8,
+        15,
+        20,
+        21,
+        24
+      ],
+      "blue_ball": 9,
+      "pool": 566415284,
+      "first_prize_count": 8,
+      "first_prize_amount": 6581443
+    },
     {
       "period": "2026092",
       "date": "2026-08-11",
